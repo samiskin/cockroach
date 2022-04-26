@@ -21,7 +21,7 @@ type TestFeedFactory interface {
 	// Feed creates a new TestFeed.
 	Feed(create string, args ...interface{}) (TestFeed, error)
 	// Server returns the raw underlying TestServer, if applicable.
-	Server() serverutils.TestServerInterface
+	Server() serverutils.TestTenantInterface
 }
 
 // TestFeedMessage represents one row update or resolved timestamp message from

@@ -52,14 +52,14 @@ import (
 )
 
 type sinklessFeedFactory struct {
-	s    serverutils.TestServerInterface
+	s    serverutils.TestTenantInterface
 	sink url.URL
 }
 
 // makeSinklessFeedFactory returns a TestFeedFactory implementation using the
 // `experimental-sql` uri.
 func makeSinklessFeedFactory(
-	s serverutils.TestServerInterface, sink url.URL,
+	s serverutils.TestTenantInterface, sink url.URL,
 ) cdctest.TestFeedFactory {
 	return &sinklessFeedFactory{s: s, sink: sink}
 }
@@ -85,7 +85,7 @@ func (f *sinklessFeedFactory) Feed(create string, args ...interface{}) (cdctest.
 }
 
 // Server implements the TestFeedFactory interface.
-func (f *sinklessFeedFactory) Server() serverutils.TestServerInterface {
+func (f *sinklessFeedFactory) Server() serverutils.TestTenantInterface {
 	return f.s
 }
 
@@ -542,7 +542,7 @@ func (di *depInjector) getJobFeed(jobID jobspb.JobID) *jobFeed {
 }
 
 type enterpriseFeedFactory struct {
-	s  serverutils.TestServerInterface
+	s  serverutils.TestTenantInterface
 	di *depInjector
 	db *gosql.DB
 }
@@ -564,7 +564,7 @@ type tableFeedFactory struct {
 // makeTableFeedFactory returns a TestFeedFactory implementation using the
 // `experimental-sql` uri.
 func makeTableFeedFactory(
-	srv serverutils.TestServerInterface, db *gosql.DB, sink url.URL,
+	srv serverutils.TestTenantInterface, db *gosql.DB, sink url.URL,
 ) cdctest.TestFeedFactory {
 	return &tableFeedFactory{
 		enterpriseFeedFactory: enterpriseFeedFactory{
@@ -628,7 +628,7 @@ func (f *tableFeedFactory) Feed(
 }
 
 // Server implements the TestFeedFactory interface.
-func (f *tableFeedFactory) Server() serverutils.TestServerInterface {
+func (f *tableFeedFactory) Server() serverutils.TestTenantInterface {
 	return f.s
 }
 
@@ -745,7 +745,7 @@ type cloudFeedFactory struct {
 // makeCloudFeedFactory returns a TestFeedFactory implementation using the cloud
 // storage uri.
 func makeCloudFeedFactory(
-	srv serverutils.TestServerInterface, db *gosql.DB, dir string,
+	srv serverutils.TestTenantInterface, db *gosql.DB, dir string,
 ) cdctest.TestFeedFactory {
 	return &cloudFeedFactory{
 		enterpriseFeedFactory: enterpriseFeedFactory{
@@ -802,7 +802,7 @@ func (f *cloudFeedFactory) Feed(
 }
 
 // Server implements the TestFeedFactory interface.
-func (f *cloudFeedFactory) Server() serverutils.TestServerInterface {
+func (f *cloudFeedFactory) Server() serverutils.TestTenantInterface {
 	return f.s
 }
 
@@ -1089,7 +1089,7 @@ var _ cdctest.TestFeedFactory = (*kafkaFeedFactory)(nil)
 
 // makeKafkaFeedFactory returns a TestFeedFactory implementation using the `kafka` uri.
 func makeKafkaFeedFactory(
-	srv serverutils.TestServerInterface, db *gosql.DB,
+	srv serverutils.TestTenantInterface, db *gosql.DB,
 ) cdctest.TestFeedFactory {
 	return &kafkaFeedFactory{
 		enterpriseFeedFactory: enterpriseFeedFactory{
@@ -1197,7 +1197,7 @@ func (k *kafkaFeedFactory) Feed(create string, args ...interface{}) (cdctest.Tes
 }
 
 // Server implements TestFeedFactory
-func (k *kafkaFeedFactory) Server() serverutils.TestServerInterface {
+func (k *kafkaFeedFactory) Server() serverutils.TestTenantInterface {
 	return k.s
 }
 
@@ -1296,7 +1296,7 @@ var _ cdctest.TestFeedFactory = (*webhookFeedFactory)(nil)
 
 // makeWebhookFeedFactory returns a TestFeedFactory implementation using the `webhook-webhooks` uri.
 func makeWebhookFeedFactory(
-	srv serverutils.TestServerInterface, db *gosql.DB,
+	srv serverutils.TestTenantInterface, db *gosql.DB,
 ) cdctest.TestFeedFactory {
 	useSecure := rand.Float32() < 0.5
 	return &webhookFeedFactory{
@@ -1371,7 +1371,7 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 	return c, nil
 }
 
-func (f *webhookFeedFactory) Server() serverutils.TestServerInterface {
+func (f *webhookFeedFactory) Server() serverutils.TestTenantInterface {
 	return f.s
 }
 
@@ -1580,7 +1580,7 @@ var _ cdctest.TestFeedFactory = (*pubsubFeedFactory)(nil)
 
 // makePubsubFeedFactory returns a TestFeedFactory implementation using the `pubsub` uri.
 func makePubsubFeedFactory(
-	srv serverutils.TestServerInterface, db *gosql.DB,
+	srv serverutils.TestTenantInterface, db *gosql.DB,
 ) cdctest.TestFeedFactory {
 	return &pubsubFeedFactory{
 		enterpriseFeedFactory: enterpriseFeedFactory{
@@ -1640,7 +1640,7 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 }
 
 // Server implements TestFeedFactory
-func (p *pubsubFeedFactory) Server() serverutils.TestServerInterface {
+func (p *pubsubFeedFactory) Server() serverutils.TestTenantInterface {
 	return p.s
 }
 
