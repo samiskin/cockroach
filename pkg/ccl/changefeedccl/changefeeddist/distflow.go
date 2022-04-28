@@ -20,6 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 )
 
 // ChangefeedResultTypes is the types returned by changefeed stream.
@@ -103,6 +104,8 @@ func StartDistChangefeed(
 	if knobs.OnDistflowSpec != nil {
 		knobs.OnDistflowSpec(aggregatorSpecs, &changeFrontierSpec)
 	}
+
+	log.Warningf(ctx, "\n\x1b[32m NUM AGGS (%+v) \x1b[0m\n\n", len(aggregatorSpecs))
 
 	aggregatorCorePlacement := make([]physicalplan.ProcessorCorePlacement, len(spanPartitions))
 	for i, sp := range spanPartitions {

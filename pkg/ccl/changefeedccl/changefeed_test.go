@@ -48,6 +48,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts/ptpb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security"
@@ -129,7 +131,7 @@ func TestChangefeedBasics(t *testing.T) {
 	// runTest(t, testFn, feedTestForceSink("kafka"))
 	// runTest(t, testFn, feedTestForceSink("webhook"))
 	// runTest(t, testFn, feedTestForceSink("pubsub"))
-	runTest(t, testFn, feedTestForceSink("cloudstorage"))
+	cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
 
 	// NB running TestChangefeedBasics, which includes a DELETE, with
 	// cloudStorageTest is a regression test for #36994.
@@ -4948,7 +4950,7 @@ INSERT INTO foo VALUES (1, 'f');
 		})
 	}
 
-	runTest(t, testFn, feedTestIncludeSinkless)
+	cdcTest(t, testFn, feedTestIncludeSinkless)
 }
 
 // Primary key changes are supported by changefeeds starting in 21.1. This test
@@ -5045,7 +5047,7 @@ INSERT INTO bar VALUES (6, 'f');
 		})
 	}
 
-	runTest(t, testFn, feedTestIncludeSinkless)
+	cdcTest(t, testFn, feedTestIncludeSinkless)
 }
 
 // TestChangefeedCheckpointSchemaChange tests to make sure that writes that
@@ -5192,7 +5194,7 @@ func TestChangefeedCheckpointSchemaChange(t *testing.T) {
 		})
 	}
 
-	runTest(t, testFn)
+	cdcTest(t, testFn)
 }
 
 func TestChangefeedBackfillCheckpoint(t *testing.T) {
@@ -5376,7 +5378,7 @@ func TestChangefeedBackfillCheckpoint(t *testing.T) {
 	// TODO(ssd): Tenant testing disabled because of use of DB()
 	for _, sz := range []int64{100 << 20, 100} {
 		maxCheckpointSize = sz
-		runTestDesc(t, fmt.Sprintf("limit=%s", humanize.Bytes(uint64(sz))), testFn)
+		cdcTestDesc(t, fmt.Sprintf("limit=%s", humanize.Bytes(uint64(sz))), testFn)
 	}
 }
 
@@ -5485,7 +5487,7 @@ func TestChangefeedOrderingWithErrors(t *testing.T) {
 
 	// only used for webhook sink for now since it's the only testfeed where
 	// we can control the ordering of errors
-	runTest(t, testFn, feedTestForceSink("webhook"))
+	cdcTest(t, testFn, feedTestForceSink("webhook"))
 }
 
 func TestChangefeedOnErrorOption(t *testing.T) {
@@ -5580,7 +5582,7 @@ func TestChangefeedOnErrorOption(t *testing.T) {
 		})
 	}
 
-	runTest(t, testFn)
+	cdcTest(t, testFn)
 }
 
 func TestDistSenderRangeFeedPopulatesVirtualTable(t *testing.T) {
@@ -5645,7 +5647,7 @@ func TestChangefeedCaseInsensitiveOpts(t *testing.T) {
 		})
 	}
 
-	runTest(t, testFn, feedTestIncludeSinkless)
+	cdcTest(t, testFn, feedTestIncludeSinkless)
 }
 
 func TestChangefeedEndTime(t *testing.T) {
@@ -5693,7 +5695,7 @@ func TestChangefeedEndTime(t *testing.T) {
 		}))
 	}
 
-	runTest(t, testFn, feedTestIncludeSinkless)
+	cdcTest(t, testFn, feedTestIncludeSinkless)
 }
 
 func TestChangefeedEndTimeWithCursor(t *testing.T) {
@@ -5745,7 +5747,7 @@ func TestChangefeedEndTimeWithCursor(t *testing.T) {
 		}))
 	}
 
-	runTest(t, testFn, feedTestIncludeSinkless)
+	cdcTest(t, testFn, feedTestIncludeSinkless)
 }
 
 func TestChangefeedOnlyInitialScan(t *testing.T) {
@@ -5800,7 +5802,7 @@ func TestChangefeedOnlyInitialScan(t *testing.T) {
 		}
 	}
 
-	runTest(t, testFn)
+	cdcTest(t, testFn)
 }
 
 func startMonitorWithBudget(budget int64) *mon.BytesMonitor {
@@ -6095,7 +6097,7 @@ func TestChangefeedFailedTelemetryLogs(t *testing.T) {
 		require.Equal(t, failLogs[0].FailureType, changefeedbase.ConnectionClosed)
 	})
 
-	runTestDesc(t, "user_input", func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+	cdcTestDesc(t, "user_input", func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.db)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
 
@@ -6108,7 +6110,7 @@ func TestChangefeedFailedTelemetryLogs(t *testing.T) {
 		require.Equal(t, failLogs[0].FailureType, changefeedbase.UserInput)
 	})
 
-	runTestDesc(t, "unknown_error", func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+	cdcTestDesc(t, "unknown_error", func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.db)
 		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
 
@@ -6132,4 +6134,206 @@ func TestChangefeedFailedTelemetryLogs(t *testing.T) {
 		require.Equal(t, failLogs[0].SinkType, `gcpubsub`)
 		require.Equal(t, failLogs[0].NumTables, int32(1))
 	}, feedTestForceSink("pubsub"))
+}
+
+func TestChangefeedHandlesDrainingNodesMultiple(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+
+	skip.UnderRace(t, "Takes too long with race enabled")
+
+	// shouldDrain := true
+	knobs := base.TestingKnobs{
+		DistSQL: &execinfra.TestingKnobs{
+			DrainFast:  true,
+			Changefeed: &TestingKnobs{},
+			// Flowinfra: &flowinfra.TestingKnobs{
+			// 	FlowRegistryDraining: func() bool {
+			// 		if shouldDrain {
+			// 			shouldDrain = false
+			// 			return true
+			// 		}
+			// 		return false
+			// 	},
+			// },
+		},
+		JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+	}
+
+	sinkDir, cleanupFn := testutils.TempDir(t)
+	defer cleanupFn()
+
+	numNodes := 5
+	tc := serverutils.StartNewTestCluster(t, numNodes, base.TestClusterArgs{
+		ReplicationMode: base.ReplicationAuto,
+		// ParallelStart:   true,
+		ServerArgs: base.TestServerArgs{
+			Knobs:           knobs,
+			ExternalIODir:   sinkDir,
+			ScanMinIdleTime: time.Millisecond,
+			ScanMaxIdleTime: time.Millisecond,
+		}})
+	defer tc.Stopper().Stop(context.Background())
+
+	// Ensure both nodes are live and able to be distributed to
+	testutils.SucceedsSoon(t, func() error {
+		status := tc.Server(1).StatusServer().(serverpb.SQLStatusServer)
+		var nodes *serverpb.NodesListResponse
+		var err error
+		for nodes == nil || len(nodes.Nodes) != numNodes {
+			nodes, err = status.NodesList(context.Background(), nil)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	log.Warningf(context.Background(), "\n\x1b[33m ALL SERVERS LIVE \x1b[0m\n")
+
+	db := tc.ServerConn(1)
+	sqlDB := sqlutils.MakeSQLRunner(db)
+	serverutils.SetClusterSetting(t, tc, "kv.rangefeed.enabled", true)
+	serverutils.SetClusterSetting(t, tc, "kv.closed_timestamp.target_duration", time.Second)
+	serverutils.SetClusterSetting(t, tc, "changefeed.experimental_poll_interval", 10*time.Millisecond)
+
+	numRanges := numNodes * 4
+	sqlDB.ExecMultiple(
+		t,
+		`CREATE DATABASE test;`,
+		`USE test;`,
+		`ALTER DATABASE defaultdb  CONFIGURE ZONE USING num_replicas = 3;`,
+		`CREATE TABLE test.foo (key INT PRIMARY KEY);`,
+		fmt.Sprintf(`INSERT INTO foo (key) SELECT * FROM generate_series(1, %d);`, numRanges*100),
+		fmt.Sprintf(`ALTER TABLE foo SPLIT AT (SELECT * FROM generate_series(100, %d, 100));`, (numRanges-1)*100),
+	)
+	for i := 1; i < numRanges; i++ {
+		storeID := 1 + i%numNodes
+		rowID := i * 100
+		sqlDB.ExecSucceedsSoon(t, "ALTER TABLE foo EXPERIMENTAL_RELOCATE VALUES (ARRAY[$1], $2)", storeID, rowID)
+	}
+	sqlDB.CheckQueryResults(t, `SELECT count(*), count(distinct lease_holder) FROM [SHOW RANGES FROM TABLE foo]`,
+		// Should be a row for each range with at least one range on each node
+		[][]string{{fmt.Sprint(numRanges), fmt.Sprint(numNodes)}},
+	)
+
+	// sqlutils.CreateTable(
+	// 	t, db, "foo",
+	// 	"k INT PRIMARY KEY, v INT",
+	// 	10,
+	// 	sqlutils.ToRowFn(sqlutils.RowIdxFn, sqlutils.RowModuloFn(2)),
+	// )
+
+	// Introduce 4 splits to get 5 ranges.  We need multiple ranges in order to run distributed
+	// flow.
+	// sqlDB.Exec(t, "ALTER TABLE test.foo SPLIT AT (SELECT i*2 FROM generate_series(1, 4) AS g(i))")
+	// sqlDB.Exec(t, "ALTER TABLE test.foo SCATTER")
+
+	t.Logf("initial distribution: %+v", sqlDB.QueryStr(t, `SELECT count(*), count(distinct lease_holder) FROM [SHOW RANGES FROM TABLE test.foo]`))
+	t.Logf("initial Diagram: %+v", sqlDB.QueryStr(t, "SELECT info FROM [EXPLAIN (DISTSQL) SELECT * FROM foo] WHERE info LIKE 'Diagram%'")[0][0])
+
+	// Create a factory which executes the CREATE CHANGEFEED statement on server 0.
+	// This statement should fail, but the job itself ought to be creaated.
+	// After some time, that job should be adopted by another node, and executed successfully.
+
+	f, closeSink := makeFeedFactory(t, randomSinkType(), tc.Server(0), tc.ServerConn(0))
+	defer closeSink()
+	foo := feed(t, f, `CREATE CHANGEFEED FOR test.foo WITH resolved="1s"`)
+	defer closeFeed(t, foo)
+
+	// Wait and return the next resolved timestamp after the wait time
+	// waitAndDrainResolved := func(ts time.Duration) hlc.Timestamp {
+	// 	targetTs := timeutil.Now().Add(ts)
+	// 	for {
+
+	// 		m, err := foo.Next()
+	// 		if err != nil {
+	// 			t.Fatal(err)
+	// 		} else if m == nil {
+	// 			t.Fatal(`expected message`)
+	// 		} else if m.Key != nil {
+	// 			continue
+	// 		} else if m.Resolved == nil {
+	// 			t.Fatal(`expected a resolved timestamp notification`)
+	// 		}
+
+	// 		resolvedTs := extractResolvedTimestamp(t, m)
+	// 		if resolvedTs.GoTime().UnixNano() > targetTs.UnixNano() {
+	// 			return resolvedTs
+	// 		}
+	// 	}
+	// }
+
+	// // At this point, the job created by feed will fail to start running on node 0 due to draining
+	// // registry.  However, this job will be retried, and it should succeed.
+	// // Note: This test is a bit unrealistic in that if the registry is draining, that
+	// // means that the server is draining (i.e. being shut down).  We don't do a full shutdown
+	// // here, but we are simulating a restart by failing to start a flow the first time around.
+	// assertPayloads(t, foo, []string{
+	// 	`foo: [1]->{"after": {"k": 1, "v": 1}}`,
+	// 	`foo: [2]->{"after": {"k": 2, "v": 0}}`,
+	// 	`foo: [3]->{"after": {"k": 3, "v": 1}}`,
+	// 	`foo: [4]->{"after": {"k": 4, "v": 0}}`,
+	// 	`foo: [5]->{"after": {"k": 5, "v": 1}}`,
+	// 	`foo: [6]->{"after": {"k": 6, "v": 0}}`,
+	// 	`foo: [7]->{"after": {"k": 7, "v": 1}}`,
+	// 	`foo: [8]->{"after": {"k": 8, "v": 0}}`,
+	// 	`foo: [9]->{"after": {"k": 9, "v": 1}}`,
+	// 	`foo: [10]->{"after": {"k": 10, "v": 0}}`,
+	// })
+
+	// waitAndDrainResolved(0)
+	// distServer2 := tc.Server(2).DistSQLServer().(*distsql.ServerImpl)
+	// distServer2.Drain(context.Background(), 0 /* flowDrainWait */, nil /* reporter */)
+
+	_, err := tc.ServerConn(0).Exec(
+		`SET CLUSTER SETTING server.failed_reservation_timeout='1ms'`)
+	require.NoError(t, err)
+
+	t.Logf("\x1b[31m\n\nServer 0 id: %s\n\n\x1b[0m", tc.Server(0).NodeID())
+	t.Logf("Before drain coordinator id: %+v", sqlDB.QueryStr(t, `SELECT coordinator_id FROM [SHOW JOBS]`))
+
+	drainingNodeIdx := 0
+	drainingNodeID := tc.Server(drainingNodeIdx).NodeID()
+	if err := tc.Server(drainingNodeIdx).NodeLiveness().(*liveness.NodeLiveness).TestingSetDrainingInternal(
+		ctx, liveness.Record{Liveness: livenesspb.Liveness{
+			NodeID: drainingNodeID,
+		}}, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	distServer := tc.Server(0).DistSQLServer().(*distsql.ServerImpl)
+	distServer.Drain(context.Background(), 0 /* flowDrainWait */, nil /* reporter */)
+	// for _, status := range []livenesspb.MembershipStatus{
+	// 	livenesspb.MembershipStatus_DECOMMISSIONING, livenesspb.MembershipStatus_DECOMMISSIONED,
+	// } {
+	// 	require.NoError(t, tc.Server(0).Decommission(ctx, status, []roachpb.NodeID{tc.Server(0).NodeID()}))
+	// }
+	// tc.Server(0).Stopper().Quiesce(ctx)
+	// tc.Server(0).Stopper().Stop(ctx)
+	// tc.StopServer(0)
+	err = tc.WaitForFullReplication()
+	require.NoError(t, err)
+	// tc.StopServer(2)
+
+	time.Sleep(2 * time.Second)
+
+	db3 := tc.ServerConn(3)
+	sqlDB3 := sqlutils.MakeSQLRunner(db3)
+	t.Logf("After drain coordinator id: %+v", sqlDB3.QueryStr(t, `SELECT coordinator_id FROM [SHOW JOBS]`))
+	t.Logf("After Drain distribution: %+v", sqlDB3.QueryStr(t, `SELECT count(*), count(distinct lease_holder) FROM [SHOW RANGES FROM TABLE test.foo]`))
+	t.Logf("After Drain Diagram: %s", sqlDB3.QueryStr(t, "SELECT info FROM [EXPLAIN (DISTSQL) SELECT * FROM test.foo] WHERE info LIKE 'Diagram%'")[0][0])
+	// log.Warningf(ctx, "\n\x1b[31m INSERTING FRMO 2 \x1b[0m\n")
+	// sqlDB3.Exec(t, "INSERT INTO test.foo VALUES (11, 1)")
+
+	// 	assertPayloads(t, foo, []string{
+	// 		`foo: [11]->{"after": {"k": 11, "v": 1}}`,
+	// 	})
+
+	log.Warningf(ctx, "\n\x1b[31m Sleeping \x1b[0m\n")
+	time.Sleep(4 * time.Second)
+	t.FailNow()
+	// log.Warningf(context.Background(), "\n\x1b[31m DONE \x1b[0m\n")
 }

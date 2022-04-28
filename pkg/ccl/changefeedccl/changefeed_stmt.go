@@ -923,6 +923,7 @@ func (b *changefeedResumer) handleChangefeedError(
 	details jobspb.ChangefeedDetails,
 	jobExec sql.JobExecContext,
 ) error {
+	log.Warningf(ctx, "\n\x1b[31m HANDLECHANGEFEEDERROR (%+v) \x1b[0m\n\n", jobExec.ExecCfg().NodeID)
 	switch onError := changefeedbase.OnErrorType(details.Opts[changefeedbase.OptOnError]); onError {
 	// default behavior
 	case changefeedbase.OptOnErrorFail:

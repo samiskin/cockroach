@@ -833,7 +833,7 @@ func randomSinkTypeWithOptions(options feedTestOptions) string {
 		"webhook":      1,
 		"pubsub":       1,
 		"sinkless":     0, // default to no sinkless to avoid surprises
-		"cloudstorage": 1,
+		"cloudstorage": 0, // needs externalIODir set
 	}
 	if options.includeSinkless {
 		sinkWeights["sinkless"] = 1
@@ -911,11 +911,11 @@ func makeFeedFactoryWithOptions(t *testing.T, sinkType string, s serverutils.Tes
 
 type cdcTestFn2 func(*testing.T, TestServer, cdctest.TestFeedFactory)
 
-func runTest(t *testing.T, testFn cdcTestFn2, testOpts ...feedTestOption) {
-	runTestDesc(t, "", testFn, testOpts...)
+func cdcTest(t *testing.T, testFn cdcTestFn2, testOpts ...feedTestOption) {
+	cdcTestDesc(t, "", testFn, testOpts...)
 }
 
-func runTestDesc(t *testing.T, desc string, testFn cdcTestFn2, testOpts ...feedTestOption) {
+func cdcTestDesc(t *testing.T, desc string, testFn cdcTestFn2, testOpts ...feedTestOption) {
 	t.Helper()
 	options := makeOptions(testOpts...)
 	sinkType := randomSinkTypeWithOptions(options)

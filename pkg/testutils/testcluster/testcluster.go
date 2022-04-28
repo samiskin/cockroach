@@ -1223,11 +1223,11 @@ func (tc *TestCluster) WaitForFullReplication() error {
 		notReplicated = false
 		for _, s := range tc.Servers {
 			err := s.Stores().VisitStores(func(s *kvserver.Store) error {
-				if n := s.ClusterNodeCount(); n != len(tc.Servers) {
-					log.Infof(context.TODO(), "%s only sees %d/%d available nodes", s, n, len(tc.Servers))
-					notReplicated = true
-					return nil
-				}
+				// if n := s.ClusterNodeCount(); n != len(tc.Servers) {
+				// 	log.Infof(context.TODO(), "%s only sees %d/%d available nodes", s, n, len(tc.Servers))
+				// 	notReplicated = true
+				// 	return nil
+				// }
 				// Force upreplication. Otherwise, if we rely on the scanner to do it,
 				// it'll take a while.
 				if err := s.ForceReplicationScanAndProcess(); err != nil {

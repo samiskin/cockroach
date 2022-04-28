@@ -143,6 +143,7 @@ func newChangeAggregatorProcessor(
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
 	ctx := flowCtx.EvalCtx.Ctx()
+	log.Warningf(ctx, "\n\x1b[32m STARTING AGGREGATOR ON NODE (%+v) \x1b[0m\n\n", flowCtx.NodeID)
 	memMonitor := execinfra.NewMonitor(ctx, flowCtx.EvalCtx.Mon, "changeagg-mem")
 	ca := &changeAggregator{
 		flowCtx: flowCtx,
@@ -1247,6 +1248,7 @@ func newChangeFrontierProcessor(
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
 	ctx := flowCtx.EvalCtx.Ctx()
+	log.Warningf(ctx, "\n\x1b[31m STARTING FRONTIER ON NODE (%+v) \x1b[0m\n\n", flowCtx.NodeID)
 	memMonitor := execinfra.NewMonitor(ctx, flowCtx.EvalCtx.Mon, "changefntr-mem")
 	sf, err := makeSchemaChangeFrontier(hlc.Timestamp{}, spec.TrackedSpans...)
 	if err != nil {
