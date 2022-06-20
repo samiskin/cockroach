@@ -22,6 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
@@ -80,6 +81,7 @@ type gcpPubsubClient struct {
 	region     string
 	topicNamer *TopicNamer
 	url        sinkURL
+	metrics    metricsRecorder
 
 	mu struct {
 		syncutil.Mutex
@@ -106,7 +108,8 @@ type pubsubSink struct {
 	client     pubsubClient
 	topicNamer *TopicNamer
 
-	format changefeedbase.FormatType
+	format  changefeedbase.FormatType
+	metrics metricsRecorder
 }
 
 // TODO: unify gcp credentials code with gcp cloud storage credentials code
@@ -153,6 +156,7 @@ func MakePubsubSink(
 	u *url.URL,
 	encodingOpts changefeedbase.EncodingOptions,
 	targets []jobspb.ChangefeedTargetSpecification,
+	mb metricsRecorderBuilder,
 ) (Sink, error) {
 
 	pubsubURL := sinkURL{URL: u, q: u.Query()}
@@ -182,6 +186,7 @@ func MakePubsubSink(
 		numWorkers:  numOfWorkers,
 		exitWorkers: cancel,
 		format:      formatType,
+		metrics:     mb(requiresResourceAccounting),
 	}
 
 	// creates custom pubsub object based on scheme
@@ -203,6 +208,7 @@ func MakePubsubSink(
 			projectID:  projectID,
 			region:     gcpEndpointForRegion(region),
 			url:        pubsubURL,
+			metrics:    p.metrics,
 		}
 		p.client = g
 		p.topicNamer = tn
@@ -263,7 +269,11 @@ func (p *pubsubSink) EmitResolvedTimestamp(
 		return errors.Wrap(err, "encoding resolved timestamp")
 	}
 
-	return p.client.sendMessageToAllTopics(payload)
+	err = p.client.sendMessageToAllTopics(payload)
+	if err != nil {
+		return errors.Wrap(err, "emitting resolved timestamp")
+	}
+	return nil
 }
 
 // Flush blocks until all messages in the event channels are sent
@@ -386,7 +396,7 @@ func (p *pubsubSink) workerLoop(workerIndex int) {
 				content = msg.message.Value
 			}
 
-			err = p.client.sendMessage(content, msg.message.Topic, string(msg.message.Key))
+			err = p.client.sendMessage(content, msg.message.Topic, fmt.Sprint(workerIndex))
 			if err != nil {
 				p.exitWorkersWithError(err)
 			}
@@ -502,20 +512,32 @@ func (p *gcpPubsubClient) closeTopics() {
 	})
 }
 
+func (p *gcpPubsubClient) gcPublish(t *pubsub.Topic, msg *pubsub.Message) error {
+	recordMessage := p.metrics.recordOneMessage()
+	res := t.Publish(p.ctx, msg)
+
+	// The Get method blocks until a server-generated ID or
+	// an error is returned for the published message.
+	_, err := res.Get(p.ctx)
+	if err == nil {
+		recordMessage(hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}, len(msg.Data), sinkDoesNotCompress)
+	}
+	return err
+}
+
 // sendMessage sends a message to the topic
-func (p *gcpPubsubClient) sendMessage(m []byte, topic string, key string) error {
+func (p *gcpPubsubClient) sendMessage(m []byte, topic string, orderingKey string) error {
 	t, err := p.getTopicClient(topic)
 	if err != nil {
 		return err
 	}
-	res := t.Publish(p.ctx, &pubsub.Message{
+
+	// Publish will batch values based on the ordering key
+	err = p.gcPublish(t, &pubsub.Message{
 		Data:        m,
-		OrderingKey: key,
+		OrderingKey: orderingKey,
 	})
 
-	// The Get method blocks until a server-generated ID or
-	// an error is returned for the published message.
-	_, err = res.Get(p.ctx)
 	if err != nil {
 		p.recordPublishError(err)
 		return err
@@ -526,14 +548,9 @@ func (p *gcpPubsubClient) sendMessage(m []byte, topic string, key string) error 
 
 func (p *gcpPubsubClient) sendMessageToAllTopics(m []byte) error {
 	return p.forEachTopic(func(_ string, t *pubsub.Topic) error {
-		res := t.Publish(p.ctx, &pubsub.Message{
+		return p.gcPublish(t, &pubsub.Message{
 			Data: m,
 		})
-		_, err := res.Get(p.ctx)
-		if err != nil {
-			return errors.Wrap(err, "emitting resolved timestamp")
-		}
-		return nil
 	})
 }
 

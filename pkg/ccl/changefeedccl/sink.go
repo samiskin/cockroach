@@ -127,8 +127,7 @@ func getSink(
 					defaultWorkerCount(), timeutil.DefaultTimeSource{}, metricsBuilder)
 			})
 		case isPubsubSink(u):
-			// TODO: add metrics to pubsubsink
-			return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg))
+			return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg), metricsBuilder)
 		case isCloudStorageSink(u):
 			return validateOptionsAndMakeSink(changefeedbase.CloudStorageValidOptions, func() (Sink, error) {
 				return makeCloudStorageSink(
