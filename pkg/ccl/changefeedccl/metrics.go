@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/metric/aggmetric"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
@@ -32,7 +33,7 @@ import (
 
 // allow creation of per changefeed SLI metrics.
 var enableSLIMetrics = envutil.EnvOrDefaultBool(
-	"COCKROACH_EXPERIMENTAL_ENABLE_PER_CHANGEFEED_METRICS", false)
+	"COCKROACH_EXPERIMENTAL_ENABLE_PER_CHANGEFEED_METRICS", true)
 
 // max length for the scope name.
 const maxSLIScopeNameLen = 128
@@ -138,6 +139,7 @@ func (m *sliMetrics) recordEmittedBatch(
 		return
 	}
 	emitNanos := timeutil.Since(startTime).Nanoseconds()
+	log.Warningf(context.Background(), "\n\n \x1b[32m INCREASING EMITTEDMESSAGES BY %v to %v \x1b[0m\n", numMessages, m.EmittedMessages.Value())
 	m.EmittedMessages.Inc(int64(numMessages))
 	m.EmittedBytes.Inc(int64(bytes))
 	if compressedBytes == sinkDoesNotCompress {

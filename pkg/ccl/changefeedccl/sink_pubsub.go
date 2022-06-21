@@ -21,6 +21,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -210,6 +211,7 @@ func MakePubsubSink(
 			url:        pubsubURL,
 			metrics:    p.metrics,
 		}
+		log.Warningf(p.workerCtx, "\n\n \x1b[31m CREATING GCPUBSUBCLIENT \x1b[0m\n")
 		p.client = g
 		p.topicNamer = tn
 		return p, nil
@@ -232,6 +234,7 @@ func (p *pubsubSink) EmitRow(
 	mvcc hlc.Timestamp,
 	alloc kvevent.Alloc,
 ) error {
+	log.Warningf(context.Background(), "\n\n \x1b[31m EMITROW \x1b[0m\n")
 	topicName, err := p.topicNamer.Name(topic)
 	if err != nil {
 		return err
@@ -256,6 +259,7 @@ func (p *pubsubSink) EmitRow(
 	case err := <-p.errChan:
 		return err
 	case p.eventsChans[i] <- m:
+		log.Warningf(context.Background(), "\n\n \x1b[31m MSG INTO EVENTCHANS %v \x1b[0m\n", i)
 	}
 	return nil
 }
@@ -379,6 +383,7 @@ func (p *pubsubSink) workerLoop(workerIndex int) {
 				// Signals a flush request, makes sure that the messages in eventsChans are finished sending
 				continue
 			}
+			log.Warningf(p.workerCtx, "\n\n \x1b[31m NEW WORKER MESSAGE \x1b[0m\n")
 
 			var content []byte
 			var err error
@@ -390,12 +395,15 @@ func (p *pubsubSink) workerLoop(workerIndex int) {
 					Topic: msg.message.Topic,
 				})
 				if err != nil {
+					log.Warningf(p.workerCtx, "\n\n \x1b[31m EXIT WITH ERROR \x1b[0m\n")
 					p.exitWorkersWithError(err)
 				}
 			case changefeedbase.OptFormatCSV:
 				content = msg.message.Value
 			}
 
+			log.Warningf(p.workerCtx, "\n\n \x1b[31m CLIENT SENDMESSAGE \x1b[0m\n")
+			log.Warningf(p.workerCtx, "\n\n \x1b[31m workerindex %s \x1b[0m\n", fmt.Sprint(workerIndex))
 			err = p.client.sendMessage(content, msg.message.Topic, fmt.Sprint(workerIndex))
 			if err != nil {
 				p.exitWorkersWithError(err)
@@ -514,12 +522,15 @@ func (p *gcpPubsubClient) closeTopics() {
 
 func (p *gcpPubsubClient) gcPublish(t *pubsub.Topic, msg *pubsub.Message) error {
 	recordMessage := p.metrics.recordOneMessage()
+	log.Warningf(p.ctx, "\n\n \x1b[31m CALLING PUBLISH \x1b[0m\n")
 	res := t.Publish(p.ctx, msg)
 
 	// The Get method blocks until a server-generated ID or
 	// an error is returned for the published message.
 	_, err := res.Get(p.ctx)
+	log.Warningf(p.ctx, "\n\n \x1b[31m FINISHED PUBLISH \x1b[0m\n")
 	if err == nil {
+		log.Warningf(p.ctx, "\n\n \x1b[31m RECORDING MESSAGE \x1b[0m\n")
 		recordMessage(hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}, len(msg.Data), sinkDoesNotCompress)
 	}
 	return err
@@ -527,6 +538,8 @@ func (p *gcpPubsubClient) gcPublish(t *pubsub.Topic, msg *pubsub.Message) error 
 
 // sendMessage sends a message to the topic
 func (p *gcpPubsubClient) sendMessage(m []byte, topic string, orderingKey string) error {
+	log.Warningf(p.ctx, "\n\n \x1b[31m workerindex %s \x1b[0m\n", orderingKey)
+	log.Warningf(context.Background(), "\n\n \x1b[31m CALLING SENDMESSAGE \x1b[0m\n")
 	t, err := p.getTopicClient(topic)
 	if err != nil {
 		return err
