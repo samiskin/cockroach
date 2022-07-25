@@ -25,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/streaming"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
+	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 )
@@ -107,6 +108,7 @@ func distStreamIngest(
 	var noTxn *kv.Txn
 
 	if len(streamIngestionSpecs) == 0 {
+    log.Infof(ctx, "ingestion job %d exiting due to empty ingestion specs", jobID)
 		return nil
 	}
 
@@ -157,6 +159,8 @@ func distStreamIngest(
 
 	// Copy the evalCtx, as dsp.Run() might change it.
 	evalCtxCopy := *evalCtx
+
+  log.Infof(ctx, "ingestion job %d running DSP", jobID)
 	dsp.Run(ctx, planCtx, noTxn, p, recv, &evalCtxCopy, nil /* finishedSetupFn */)()
 	return rw.Err()
 }

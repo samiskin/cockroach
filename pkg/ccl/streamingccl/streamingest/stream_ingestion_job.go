@@ -157,6 +157,7 @@ func ingest(ctx context.Context, execCtx sql.JobExecContext, ingestionJob *jobs.
 		if err != nil {
 			return err
 		}
+    log.Infof(ctx, "ingestion job %d stream topology: (%+v)", ingestionJob.ID(), topology)
 
 		// TODO(casper): update running status
 		err = ingestionJob.Update(ctx, nil, func(txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater) error {
@@ -194,6 +195,10 @@ func ingest(ctx context.Context, execCtx sql.JobExecContext, ingestionJob *jobs.
 		// Plan and run the DistSQL flow.
 		log.Infof(ctx, "starting to plan and run DistSQL flow for stream ingestion job %d",
 			ingestionJob.ID())
+    log.Infof(ctx, "SPECS for stream ingestion job %d: ", ingestionJob.ID())
+    log.Infof(ctx, "sqlInstanceIDs: (%+v)", sqlInstanceIDs)
+    log.Infof(ctx, "streamIngestionSpecs: (%+v)", streamIngestionSpecs)
+    log.Infof(ctx, "streamIngestionFrontierSpec: (%+v)", streamIngestionFrontierSpec)
 		if err = distStreamIngest(ctx, execCtx, sqlInstanceIDs, ingestionJob.ID(), planCtx, dsp,
 			streamIngestionSpecs, streamIngestionFrontierSpec); err != nil {
 			return err

@@ -229,6 +229,8 @@ func newStreamIngestionDataProcessor(
 func (sip *streamIngestionProcessor) Start(ctx context.Context) {
 	ctx = logtags.AddTag(ctx, "job", sip.spec.JobID)
 	log.Infof(ctx, "starting ingest proc")
+  log.Infof(ctx, "ingest proc spec: (%+v)", sip.spec)
+  log.Infof(ctx, "ingest proc token: (%+v)", sip.spec)
 	ctx = sip.StartInternal(ctx, streamIngestionProcessorName)
 
 	sip.metrics = sip.flowCtx.Cfg.JobRegistry.MetricsStruct().StreamIngest.(*Metrics)
@@ -271,6 +273,8 @@ func (sip *streamIngestionProcessor) Start(ctx context.Context) {
 			streamClient = sip.forceClientForTests
 			log.Infof(ctx, "using testing client")
 		} else {
+
+      log.Infof(ctx, "data processor connecting to %s", addr)
 			streamClient, err = streamclient.NewStreamClient(streamingccl.StreamAddress(addr))
 			if err != nil {
 				sip.MoveToDraining(errors.Wrapf(err, "creating client for partition spec %q from %q", token, addr))
@@ -287,6 +291,7 @@ func (sip *streamIngestionProcessor) Start(ctx context.Context) {
 			}
 		}
 
+    log.Infof(ctx, "data processor subscribing to stream (%+v) with token (%+v) for start time (%+v)", sip.spec.StreamID, token, startTime)
 		sub, err := streamClient.Subscribe(ctx, streaming.StreamID(sip.spec.StreamID), token, startTime)
 
 		if err != nil {

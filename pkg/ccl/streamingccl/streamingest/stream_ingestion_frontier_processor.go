@@ -91,6 +91,7 @@ func newStreamIngestionFrontierProcessor(
 	post *execinfrapb.PostProcessSpec,
 	output execinfra.RowReceiver,
 ) (execinfra.Processor, error) {
+  log.Infof(context.Background(), "starting ingestion frontier processor for spec (%+v)", spec)
 	frontier, err := span.MakeFrontierAt(spec.HighWaterAtStart, spec.TrackedSpans...)
 	if err != nil {
 		return nil, err
