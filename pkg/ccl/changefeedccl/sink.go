@@ -26,6 +26,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
+	"github.com/cockroachdb/cockroach/pkg/util/system"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -87,6 +88,32 @@ type ResolvedTimestampSink interface {
 // the topics that a changefeed will emit to.
 type SinkWithTopics interface {
 	Topics() []string
+}
+
+func getSinkWorkerFactory(
+	ctx context.Context,
+	serverCfg *execinfra.ServerConfig,
+	feedCfg jobspb.ChangefeedDetails,
+	timestampOracle timestampLowerBoundOracle,
+	user username.SQLUsername,
+	jobID jobspb.JobID,
+	m metricsRecorder,
+) SinkWorkerFactory {
+
+	builder := func() (SinkWorker, error) {
+		sink, err := getSink(ctx, serverCfg, feedCfg, timestampOracle, user, jobID, m)
+		if err != nil {
+			return nil, err
+		}
+		sinkWorker, ok := sink.(SinkWorker)
+		if !ok {
+			return nil, errors.Errorf("cannot construct sink worker factory from given sink type")
+		}
+		return sinkWorker, nil
+	}
+	return &sinkWorkerFactory{
+		builder: builder,
+	}
 }
 
 func getEventSink(
@@ -176,7 +203,7 @@ func getSink(
 			}
 			return validateOptionsAndMakeSink(changefeedbase.WebhookValidOptions, func() (Sink, error) {
 				return makeWebhookSink(ctx, sinkURL{URL: u}, encodingOpts, webhookOpts,
-					defaultWorkerCount(), timeutil.DefaultTimeSource{}, metricsBuilder)
+					system.NumCPU(), timeutil.DefaultTimeSource{}, metricsBuilder)
 			})
 		case isPubsubSink(u):
 			// TODO: add metrics to pubsubsink
@@ -555,12 +582,10 @@ func (n *nullSink) Dial() error {
 }
 
 // safeSink wraps an EventSink in a mutex so it's methods are
-// thread safe. It also has a beforeFlush hook which is called
-// at the beginning of safeSink.Flush().
+// thread safe.
 type safeSink struct {
 	syncutil.Mutex
-	beforeFlush func(ctx context.Context) error
-	wrapped     EventSink
+	wrapped EventSink
 }
 
 var _ EventSink = (*safeSink)(nil)
@@ -590,9 +615,6 @@ func (s *safeSink) EmitRow(
 }
 
 func (s *safeSink) Flush(ctx context.Context) error {
-	if err := s.beforeFlush(ctx); err != nil {
-		return err
-	}
 	s.Lock()
 	defer s.Unlock()
 	return s.wrapped.Flush(ctx)

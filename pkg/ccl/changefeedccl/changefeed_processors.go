@@ -262,6 +262,16 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 		ca.changedRowBuf = &b.buf
 	}
 
+	// SinkWorkers are meant to be used as a factory where a unique sink is used
+	// per eventConsumer worker
+	var sinkFactory SinkWorkerFactory
+	if _, ok := ca.sink.(SinkWorker); ok {
+		sinkFactory = getSinkWorkerFactory(
+			ctx, ca.flowCtx.Cfg, ca.spec.Feed, timestampOracle,
+			ca.spec.User(), ca.spec.JobID, ca.sliMetrics,
+		)
+	}
+
 	// If the initial scan was disabled the highwater would've already been forwarded
 	needsInitialScan := ca.frontier.Frontier().IsEmpty()
 
@@ -281,9 +291,10 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 		return
 	}
 	ca.sink = &errorWrapperSink{wrapped: ca.sink}
+
 	ca.eventConsumer, ca.sink, err = newEventConsumer(
 		ctx, ca.flowCtx.Cfg, ca.spec, feed, ca.frontier.SpanFrontier(), kvFeedHighWater,
-		ca.sink, ca.metrics, ca.knobs)
+		ca.sink, sinkFactory, ca.metrics, ca.knobs)
 
 	if err != nil {
 		// Early abort in the case that there is an error setting up the consumption.
@@ -516,7 +527,8 @@ func (ca *changeAggregator) tick() error {
 			ca.sliMetrics.AdmitLatency.RecordValue(timeutil.Since(event.Timestamp().GoTime()).Nanoseconds())
 		}
 		ca.recentKVCount++
-		return ca.eventConsumer.ConsumeEvent(ca.Ctx(), event)
+		_, err := ca.eventConsumer.ConsumeEvent(ca.Ctx(), event)
+		return err
 	case kvevent.TypeResolved:
 		a := event.DetachAlloc()
 		a.Release(ca.Ctx())
@@ -525,10 +537,17 @@ func (ca *changeAggregator) tick() error {
 			return ca.noteResolvedSpan(resolved)
 		}
 	case kvevent.TypeFlush:
-		return ca.sink.Flush(ca.Ctx())
+		return ca.flushBufferedEvents()
 	}
 
 	return nil
+}
+
+func (ca *changeAggregator) flushBufferedEvents() error {
+	if err := ca.eventConsumer.Flush(ca.Ctx()); err != nil {
+		return err
+	}
+	return ca.sink.Flush(ca.Ctx())
 }
 
 // noteResolvedSpan periodically flushes Frontier progress from the current
@@ -568,7 +587,7 @@ func (ca *changeAggregator) flushFrontier() error {
 	// otherwise, we could lose buffered messages and violate the
 	// at-least-once guarantee. This is also true for checkpointing the
 	// resolved spans in the job progress.
-	if err := ca.sink.Flush(ca.Ctx()); err != nil {
+	if err := ca.flushBufferedEvents(); err != nil {
 		return err
 	}
 

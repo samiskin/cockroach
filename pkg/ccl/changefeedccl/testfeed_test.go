@@ -547,6 +547,30 @@ func (s *notifyFlushSink) EncodeAndEmitRow(
 
 var _ Sink = (*notifyFlushSink)(nil)
 
+type notifyFlushSinkWorker struct {
+	SinkWorker
+	sync      *sinkSynchronizer
+	successCh chan int
+}
+
+func (s *notifyFlushSinkWorker) watchSuccesses(shutdown chan struct{}) {
+	for {
+		select {
+		case numFlushed := <-s.SinkWorker.Successes():
+			s.sync.addFlush()
+			s.successCh <- numFlushed
+		case <-shutdown:
+			return
+		}
+	}
+}
+
+func (s *notifyFlushSinkWorker) Successes() chan int {
+	return s.successCh
+}
+
+var _ SinkWorker = (*notifyFlushSinkWorker)(nil)
+
 // feedInjectable is the subset of the
 // TestServerInterface/TestTenantInterface needed for depInjector to
 // work correctly.
@@ -1899,9 +1923,26 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 		}
 	}
 
+	var wg sync.WaitGroup
+
 	ss := &sinkSynchronizer{}
+	done := make(chan struct{})
 	wrapSink := func(s Sink) Sink {
-		return &notifyFlushSink{Sink: s, sync: ss}
+		if sinkWorker, ok := s.(SinkWorker); ok {
+			notifyWorker := notifyFlushSinkWorker{
+				SinkWorker: sinkWorker,
+				sync:       ss,
+				successCh:  make(chan int, 256),
+			}
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				notifyWorker.watchSuccesses(done)
+			}()
+			return &notifyWorker
+		}
+		return s
 	}
 
 	c := &webhookFeed{
@@ -1910,6 +1951,8 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 		ss:             ss,
 		isBare:         createStmt.Select != nil,
 		mockSink:       sinkDest,
+		wg:             &wg,
+		doneCh:         done,
 	}
 	if err := f.startFeedJob(c.jobFeed, createStmt.String(), args...); err != nil {
 		sinkDest.Close()
@@ -1928,6 +1971,8 @@ type webhookFeed struct {
 	ss       *sinkSynchronizer
 	isBare   bool
 	mockSink *cdctest.MockWebhookSink
+	doneCh   chan struct{}
+	wg       *sync.WaitGroup
 }
 
 var _ cdctest.TestFeed = (*webhookFeed)(nil)
@@ -2065,6 +2110,8 @@ func (f *webhookFeed) Close() error {
 		return err
 	}
 	f.mockSink.Close()
+	close(f.doneCh)
+	f.wg.Wait()
 	return nil
 }
 

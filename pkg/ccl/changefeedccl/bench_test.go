@@ -262,7 +262,7 @@ func createBenchmarkChangefeed(
 			return jobspb.ResolvedSpan{}, err
 		}
 		if event.Type() == kvevent.TypeKV {
-			if err := eventConsumer.ConsumeEvent(ctx, event); err != nil {
+			if _, err := eventConsumer.ConsumeEvent(ctx, event); err != nil {
 				return jobspb.ResolvedSpan{}, err
 			}
 		}
