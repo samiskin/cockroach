@@ -242,7 +242,7 @@ func assertPayloadsTimeout() time.Duration {
 	if util.RaceEnabled {
 		return 5 * time.Minute
 	}
-	return 30 * time.Second
+	return 10 * time.Second
 }
 
 func withTimeout(
@@ -765,8 +765,8 @@ func randomSinkTypeWithOptions(options feedTestOptions) string {
 	sinkWeights := map[string]int{
 		"kafka":        0,
 		"enterprise":   0,
-		"webhook":      1,
-		"pubsub":       0,
+		"webhook":      0,
+		"pubsub":       1,
 		"sinkless":     0,
 		"cloudstorage": 0,
 	}

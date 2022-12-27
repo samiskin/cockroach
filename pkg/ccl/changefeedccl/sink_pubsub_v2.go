@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"time"
 
 	"cloud.google.com/go/pubsub"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
@@ -34,13 +35,18 @@ func (ps *pubsubThinSink) EncodeBatch(msgs []MessagePayload) (SinkPayload, error
 	for _, msg := range msgs {
 		var content []byte
 		var err error
+		topicName, err := ps.topicNamer.Name(msg.topic)
+		if err != nil {
+			return nil, err
+		}
 		switch ps.format {
 		case changefeedbase.OptFormatJSON:
 			content, err = json.Marshal(jsonPayload{
 				Key:   msg.key,
 				Value: msg.val,
-				Topic: msg.topic,
+				Topic: topicName,
 			})
+			// fmt.Printf("\x1b[32m ENCODE MSG (%+v)\x1b[0m\n", string(content))
 			if err != nil {
 				return nil, err
 			}
@@ -50,23 +56,25 @@ func (ps *pubsubThinSink) EncodeBatch(msgs []MessagePayload) (SinkPayload, error
 
 		sinkMessages = append(sinkMessages, pubsubMessagePayload{
 			content: content,
-			topic:   msg.topic,
+			topic:   topicName,
 		})
 	}
-	return sinkMessages, nil
+	return pubsubPayload{messages: sinkMessages}, nil
 }
 
 func (ps *pubsubThinSink) EncodeResolvedMessage(payload ResolvedMessagePayload) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0)
-	ps.topicNamer.Each(func(topic string) error {
+	if err := ps.topicNamer.Each(func(topic string) error {
 		sinkMessages = append(sinkMessages, pubsubMessagePayload{
 			content: payload.body,
 			topic:   topic,
 		})
 		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
 
-	return sinkMessages, nil
+	return pubsubPayload{messages: sinkMessages}, nil
 }
 
 func (ps *pubsubThinSink) getTopicClient(topic string) (*pubsub.Topic, error) {
@@ -90,6 +98,9 @@ func (ps *pubsubThinSink) getTopicClient(topic string) (*pubsub.Topic, error) {
 			return nil, err
 		}
 	}
+	tc.PublishSettings.DelayThreshold = 100 * time.Minute
+	tc.PublishSettings.CountThreshold = 10000
+	tc.PublishSettings.ByteThreshold = 1e12
 
 	return tc, nil
 }
@@ -136,14 +147,16 @@ func (ps *pubsubThinSink) EmitPayload(payload SinkPayload) error {
 }
 
 func (ps *pubsubThinSink) Close() error {
-	ps.topicNamer.Each(func(topic string) error {
+	if err := ps.topicNamer.Each(func(topic string) error {
 		t, err := ps.getTopicClient(topic)
 		if err != nil {
 			return err
 		}
 		t.Stop()
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
 
 	return ps.client.Close()
 }
@@ -161,6 +174,7 @@ func makePubsubThinSink(
 	u *url.URL,
 	encodingOpts changefeedbase.EncodingOptions,
 	targets changefeedbase.Targets,
+	knobs *TestingKnobs,
 ) (ThinSink, error) {
 	if u.Scheme != GcpScheme {
 		return nil, errors.Errorf("unknown scheme: %s", u.Scheme)
@@ -185,33 +199,21 @@ func makePubsubThinSink(
 	}
 
 	pubsubURL := sinkURL{URL: u, q: u.Query()}
-	const regionParam = "region"
-	projectID := pubsubURL.Host
-	if projectID == "" {
-		return nil, errors.New("missing project name")
-	}
-	region := pubsubURL.consumeParam(regionParam)
-	if region == "" {
-		return nil, errors.New("region query parameter not found")
-	}
+
 	pubsubTopicName := pubsubURL.consumeParam(changefeedbase.SinkParamTopicName)
 	topicNamer, err := MakeTopicNamer(targets, WithSingleName(pubsubTopicName))
 	if err != nil {
 		return nil, err
 	}
 
-	creds, err := getGCPCredentials(ctx, pubsubURL)
+	var client *pubsub.Client
+	if knobs != nil && knobs.PubsubClientOverride != nil {
+		client, err = knobs.PubsubClientOverride(ctx)
+	} else {
+		client, err = makeClient(ctx, pubsubURL)
+	}
 	if err != nil {
 		return nil, err
-	}
-	client, err := pubsub.NewClient(
-		ctx,
-		projectID,
-		creds,
-		option.WithEndpoint(gcpEndpointForRegion(region)),
-	)
-	if err != nil {
-		return nil, errors.Wrap(err, "opening client")
 	}
 
 	thinSink := &pubsubThinSink{
@@ -224,6 +226,37 @@ func makePubsubThinSink(
 	return thinSink, nil
 }
 
+func makeClient(ctx context.Context, url sinkURL) (*pubsub.Client, error) {
+	const regionParam = "region"
+	projectID := url.Host
+	if projectID == "" {
+		return nil, errors.New("missing project name")
+	}
+	region := url.consumeParam(regionParam)
+	if region == "" {
+		return nil, errors.New("region query parameter not found")
+	}
+
+	creds, err := getGCPCredentials(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	options := []option.ClientOption{
+		creds,
+		option.WithEndpoint(gcpEndpointForRegion(region)),
+	}
+
+	client, err := pubsub.NewClient(
+		ctx,
+		projectID,
+		options...,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "opening client")
+	}
+	return client, nil
+}
+
 func makePubsubSink(
 	ctx context.Context,
 	u *url.URL,
@@ -232,8 +265,9 @@ func makePubsubSink(
 	targets changefeedbase.Targets,
 	source timeutil.TimeSource,
 	mb metricsRecorderBuilder,
+	knobs *TestingKnobs,
 ) (Sink, error) {
-	thinSink, err := makePubsubThinSink(ctx, u, encodingOpts, targets)
+	thinSink, err := makePubsubThinSink(ctx, u, encodingOpts, targets, knobs)
 	if err != nil {
 		return nil, err
 	}
@@ -242,5 +276,6 @@ func makePubsubSink(
 	if err != nil {
 		return nil, err
 	}
+	flushCfg.Messages = 100
 	return makeBatchingWorkerSink(ctx, thinSink, flushCfg, retryOpts, source, mb)
 }

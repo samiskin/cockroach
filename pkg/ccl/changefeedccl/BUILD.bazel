@@ -302,6 +302,11 @@ go_test(
         "@com_github_shopify_sarama//:sarama",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@com_google_cloud_go_pubsub//:pubsub",
+        "@com_google_cloud_go_pubsub//pstest",
+        "@org_golang_google_api//option",
+        "@org_golang_google_genproto//googleapis/pubsub/v1:pubsub",
+        "@org_golang_google_grpc//:go_default_library",
         "@org_golang_x_text//collate",
     ],
 )

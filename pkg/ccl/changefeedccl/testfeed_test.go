@@ -29,6 +29,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/pstest"
 	"github.com/Shopify/sarama"
 	"github.com/cockroachdb/cockroach-go/v2/crdb"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdcevent"
@@ -58,6 +60,9 @@ import (
 	"github.com/cockroachdb/errors"
 	goparquet "github.com/fraugster/parquet-go"
 	"github.com/jackc/pgx/v4"
+	"google.golang.org/api/option"
+	pb "google.golang.org/genproto/googleapis/pubsub/v1"
+	"google.golang.org/grpc"
 )
 
 type sinklessFeedFactory struct {
@@ -1925,22 +1930,12 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 
 	var wg sync.WaitGroup
 
-	ss := &sinkSynchronizer{}
 	done := make(chan struct{})
+	ss := &sinkSynchronizer{}
+
 	wrapSink := func(s Sink) Sink {
 		if sinkWorker, ok := s.(SinkWorker); ok {
-			notifyWorker := notifyFlushSinkWorker{
-				SinkWorker: sinkWorker,
-				sync:       ss,
-				successCh:  make(chan int, 256),
-			}
-
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				notifyWorker.watchSuccesses(done)
-			}()
-			return &notifyWorker
+			return wrapSinkWorker(sinkWorker, &wg, done, ss)
 		}
 		return s
 	}
@@ -1959,6 +1954,21 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 		return nil, err
 	}
 	return c, nil
+}
+
+func wrapSinkWorker(sinkWorker SinkWorker, wg *sync.WaitGroup, doneCh chan struct{}, ss *sinkSynchronizer) SinkWorker {
+	notifyWorker := notifyFlushSinkWorker{
+		SinkWorker: sinkWorker,
+		sync:       ss,
+		successCh:  make(chan int, 256),
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		notifyWorker.watchSuccesses(doneCh)
+	}()
+	return &notifyWorker
 }
 
 func (f *webhookFeedFactory) Server() serverutils.TestTenantInterface {
@@ -2142,6 +2152,91 @@ func (p *mockPubsubMessageBuffer) push(m mockPubsubMessage) {
 	p.rows = append(p.rows, m)
 }
 
+type fakePubsubServer struct {
+	srv      *pstest.Server
+	msgIndex int
+	conns    []*grpc.ClientConn
+	mu       struct {
+		syncutil.Mutex
+		buffer []mockPubsubMessage
+		notify chan struct{}
+	}
+}
+
+func makeFakePubsubServer() *fakePubsubServer {
+	mockServer := fakePubsubServer{}
+	mockServer.mu.buffer = make([]mockPubsubMessage, 0)
+	mockServer.srv = pstest.NewServer(pstest.ServerReactorOption{
+		FuncName: "Publish",
+		Reactor:  &mockServer,
+	})
+	return &mockServer
+}
+
+var _ pstest.Reactor = (*fakePubsubServer)(nil)
+
+func (ps *fakePubsubServer) React(req interface{}) (handled bool, ret interface{}, err error) {
+	publishReq, ok := req.(*pb.PublishRequest)
+	if ok {
+		ps.mu.Lock()
+		defer ps.mu.Unlock()
+		for _, msg := range publishReq.Messages {
+			ps.mu.buffer = append(ps.mu.buffer, mockPubsubMessage{data: string(msg.Data)})
+		}
+		if ps.mu.notify != nil {
+			close(ps.mu.notify)
+			ps.mu.notify = nil
+		}
+	}
+
+	return false, nil, nil
+}
+
+func (s *fakePubsubServer) NotifyMessage() chan struct{} {
+	c := make(chan struct{})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.mu.buffer) > 0 {
+		close(c)
+	} else {
+		s.mu.notify = c
+	}
+	return c
+}
+
+func (ps *fakePubsubServer) Dial() (*grpc.ClientConn, error) {
+	conn, err := grpc.Dial(ps.srv.Addr, grpc.WithInsecure())
+	if err != nil {
+		return nil, err
+	}
+	ps.conns = append(ps.conns, conn)
+	return conn, nil
+}
+
+func (ps *fakePubsubServer) Pop() *mockPubsubMessage {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if len(ps.mu.buffer) == 0 {
+		return nil
+	}
+	var head mockPubsubMessage
+	head, ps.mu.buffer = ps.mu.buffer[0], ps.mu.buffer[1:]
+	return &head
+}
+
+func (ps *fakePubsubServer) Close() error {
+	ps.srv.Wait()
+	if err := ps.srv.Close(); err != nil {
+		return err
+	}
+	for _, conn := range ps.conns {
+		if err := conn.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type fakePubsubClient struct {
 	buffer *mockPubsubMessageBuffer
 }
@@ -2225,37 +2320,39 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 		createStmt.SinkURI = tree.NewStrVal(GcpScheme + "://testfeed?region=testfeedRegion")
 	}
 
-	if err != nil {
-		return nil, err
-	}
-	ss := &sinkSynchronizer{}
-
-	client := &fakePubsubClient{
-		buffer: &mockPubsubMessageBuffer{
-			rows: make([]mockPubsubMessage, 0),
-		},
-	}
-
-	wrapSink := func(s Sink) Sink {
-		return &fakePubsubSink{
-			Sink:   s,
-			client: client,
-			sync:   ss,
+	mockServer := makeFakePubsubServer()
+	p.Server().DistSQLServer().(*distsql.ServerImpl).TestingKnobs.Changefeed.(*TestingKnobs).PubsubClientOverride = func(ctx context.Context) (*pubsub.Client, error) {
+		conn, err := mockServer.Dial()
+		if err != nil {
+			return nil, err
 		}
+		return pubsub.NewClient(
+			ctx,
+			"testfeed",
+			option.WithGRPCConn(conn),
+		)
+	}
+
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	ss := &sinkSynchronizer{}
+	wrapSink := func(s Sink) Sink {
+		if sinkWorker, ok := s.(SinkWorker); ok {
+			return wrapSinkWorker(sinkWorker, &wg, done, ss)
+		}
+		return s
 	}
 
 	c := &pubsubFeed{
 		jobFeed:        newJobFeed(p.jobsTableConn(), wrapSink),
 		seenTrackerMap: make(map[string]struct{}),
 		ss:             ss,
-		client:         client,
+		doneCh:         done,
+		wg:             &wg,
+		mockServer:     mockServer,
 	}
 
 	if err := p.startFeedJob(c.jobFeed, createStmt.String(), args...); err != nil {
-		return nil, err
-	}
-
-	if err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -2269,8 +2366,11 @@ func (p *pubsubFeedFactory) Server() serverutils.TestTenantInterface {
 type pubsubFeed struct {
 	*jobFeed
 	seenTrackerMap
-	ss     *sinkSynchronizer
-	client *fakePubsubClient
+	ss         *sinkSynchronizer
+	client     *fakePubsubClient
+	mockServer *fakePubsubServer
+	wg         *sync.WaitGroup
+	doneCh     chan struct{}
 }
 
 var _ cdctest.TestFeed = (*pubsubFeed)(nil)
@@ -2305,7 +2405,7 @@ func extractJSONMessagePubsub(wrapped []byte) (value []byte, key []byte, topic s
 // Next implements TestFeed
 func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 	for {
-		msg := p.client.buffer.pop()
+		msg := p.mockServer.Pop()
 		if msg != nil {
 			details, err := p.Details()
 			if err != nil {
@@ -2348,6 +2448,8 @@ func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 					return ctx.Err()
 				case <-p.ss.eventReady():
 					return nil
+				case <-p.mockServer.NotifyMessage():
+					return nil
 				case <-p.shutdown:
 					return p.terminalJobError()
 				}
@@ -2360,10 +2462,14 @@ func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 
 // Close implements TestFeed
 func (p *pubsubFeed) Close() error {
+	// fmt.Printf("\x1b[33m CLOSE \x1b[0m\n")
 	err := p.jobFeed.Close()
 	if err != nil {
 		return err
 	}
+	close(p.doneCh)
+	p.wg.Wait()
+	p.mockServer.Close()
 	return nil
 }
 

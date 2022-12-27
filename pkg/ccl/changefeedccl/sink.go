@@ -206,8 +206,13 @@ func getSink(
 			})
 		case isPubsubSink(u):
 			// TODO: add metrics to pubsubsink
-			return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg))
-			// return makePubsubSink(ctx, u, encodingOpts, opts.GetPubsubConfigJSON(), AllTargets(feedCfg), timeutil.DefaultTimeSource{}, metricsBuilder)
+			// return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg))
+
+			var testingKnobs *TestingKnobs
+			if knobs, ok := serverCfg.TestingKnobs.Changefeed.(*TestingKnobs); ok {
+				testingKnobs = knobs
+			}
+			return makePubsubSink(ctx, u, encodingOpts, opts.GetPubsubConfigJSON(), AllTargets(feedCfg), timeutil.DefaultTimeSource{}, metricsBuilder, testingKnobs)
 		case isCloudStorageSink(u):
 			return validateOptionsAndMakeSink(changefeedbase.CloudStorageValidOptions, func() (Sink, error) {
 				return makeCloudStorageSink(

@@ -51,7 +51,7 @@ type SinkPayload interface{}
 type MessagePayload struct {
 	key   []byte
 	val   []byte
-	topic string
+	topic TopicDescriptor // TODO move topicnamer into sink_worker
 }
 
 // ResolvedMessagePayload represents a Resolved event to be emitted.
@@ -223,8 +223,9 @@ func (bs *batchingWorkerSink) EmitRow(
 ) error {
 	bs.rowCh <- rowPayload{
 		msg: MessagePayload{
-			key: key,
-			val: value,
+			key:   key,
+			val:   value,
+			topic: topic,
 		},
 		mvcc:  mvcc,
 		alloc: alloc,
@@ -316,7 +317,7 @@ func (bs *batchingWorkerSink) startEmitWorker() error {
 		case <-bs.doneCh:
 			return nil
 		case batch := <-bs.batchCh:
-			defer bs.metrics.recordFlushRequestCallback()()
+			flushCallback := bs.metrics.recordFlushRequestCallback()
 			err := bs.sendWithRetries(batch.sinkPayload, batch.numMessages)
 			if err != nil {
 				bs.handleError(err)
@@ -328,6 +329,7 @@ func (bs *batchingWorkerSink) startEmitWorker() error {
 			batch.alloc.Release(bs.ctx)
 
 			bs.successCh <- batch.numMessages
+			flushCallback()
 		}
 	}
 }

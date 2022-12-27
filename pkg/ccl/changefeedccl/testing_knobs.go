@@ -11,6 +11,7 @@ package changefeedccl
 import (
 	"context"
 
+	"cloud.google.com/go/pubsub"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvfeed"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/sql"
@@ -32,6 +33,8 @@ type TestingKnobs struct {
 	// It allows the tests to muck with the Sink, and even return altogether different
 	// implementation.
 	WrapSink func(s Sink, jobID jobspb.JobID) Sink
+	// PubsubClientOverride, if set, overrides the client object used by the pubsub sink
+	PubsubClientOverride func(ctx context.Context) (*pubsub.Client, error)
 	// FilterSpanWithMutation is a filter returning true if the resolved span event should
 	// be skipped. This method takes a pointer in case resolved spans need to be mutated.
 	FilterSpanWithMutation func(resolved *jobspb.ResolvedSpan) bool

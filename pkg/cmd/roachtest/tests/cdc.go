@@ -1110,7 +1110,7 @@ func registerCDC(r registry.Registry) {
 		},
 	})
 	r.Add(registry.TestSpec{
-		Name:            "cdc/pubsub-sink",
+		Name:            "cdc/pubsub-sink-basic",
 		Owner:           `cdc`,
 		Cluster:         r.MakeClusterSpec(4, spec.CPU(16)),
 		RequiresLicense: true,
@@ -1118,7 +1118,7 @@ func registerCDC(r registry.Registry) {
 			ct := newCDCTester(ctx, t, c)
 			defer ct.Close()
 
-			ct.runTPCCWorkload(tpccArgs{warehouses: 1, duration: "30m"})
+			ct.runTPCCWorkload(tpccArgs{warehouses: 100, duration: "30m"})
 
 			feed := ct.newChangefeed(feedArgs{
 				sinkType: pubsubSink,
