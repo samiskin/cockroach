@@ -26,7 +26,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
-	"github.com/cockroachdb/cockroach/pkg/util/system"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 )
@@ -203,11 +202,12 @@ func getSink(
 			}
 			return validateOptionsAndMakeSink(changefeedbase.WebhookValidOptions, func() (Sink, error) {
 				return makeWebhookSink(ctx, sinkURL{URL: u}, encodingOpts, webhookOpts,
-					system.NumCPU(), timeutil.DefaultTimeSource{}, metricsBuilder)
+					timeutil.DefaultTimeSource{}, metricsBuilder)
 			})
 		case isPubsubSink(u):
 			// TODO: add metrics to pubsubsink
 			return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg))
+			// return makePubsubSink(ctx, u, encodingOpts, opts.GetPubsubConfigJSON(), AllTargets(feedCfg), timeutil.DefaultTimeSource{}, metricsBuilder)
 		case isCloudStorageSink(u):
 			return validateOptionsAndMakeSink(changefeedbase.CloudStorageValidOptions, func() (Sink, error) {
 				return makeCloudStorageSink(
