@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type pubsubThinSink struct {
+type pubsubEmitter struct {
 	ctx        context.Context
 	client     *pubsub.Client
 	topicNamer *TopicNamer
@@ -28,18 +28,18 @@ type pubsubThinSink struct {
 	topicCreateErr error
 }
 
-var _ ThinSink = (*pubsubThinSink)(nil)
+var _ SinkEmitter = (*pubsubEmitter)(nil)
 
-func (ps *pubsubThinSink) EncodeBatch(msgs []MessagePayload) (SinkPayload, error) {
+func (pe *pubsubEmitter) EncodeBatch(msgs []MessagePayload) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0, len(msgs))
 	for _, msg := range msgs {
 		var content []byte
 		var err error
-		topicName, err := ps.topicNamer.Name(msg.topic)
+		topicName, err := pe.topicNamer.Name(msg.topic)
 		if err != nil {
 			return nil, err
 		}
-		switch ps.format {
+		switch pe.format {
 		case changefeedbase.OptFormatJSON:
 			content, err = json.Marshal(jsonPayload{
 				Key:   msg.key,
@@ -62,9 +62,9 @@ func (ps *pubsubThinSink) EncodeBatch(msgs []MessagePayload) (SinkPayload, error
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
-func (ps *pubsubThinSink) EncodeResolvedMessage(payload ResolvedMessagePayload) (SinkPayload, error) {
+func (pe *pubsubEmitter) EncodeResolvedMessage(payload ResolvedMessagePayload) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0)
-	if err := ps.topicNamer.Each(func(topic string) error {
+	if err := pe.topicNamer.Each(func(topic string) error {
 		sinkMessages = append(sinkMessages, pubsubMessagePayload{
 			content: payload.body,
 			topic:   topic,
@@ -77,24 +77,24 @@ func (ps *pubsubThinSink) EncodeResolvedMessage(payload ResolvedMessagePayload) 
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
-func (ps *pubsubThinSink) getTopicClient(topic string) (*pubsub.Topic, error) {
-	tc, ok := ps.topicCache[topic]
+func (pe *pubsubEmitter) getTopicClient(topic string) (*pubsub.Topic, error) {
+	tc, ok := pe.topicCache[topic]
 	if ok {
 		return tc, nil
 	}
 
-	tc, err := ps.client.CreateTopic(ps.ctx, topic)
+	tc, err := pe.client.CreateTopic(pe.ctx, topic)
 	if err != nil {
 		switch status.Code(err) {
 		case codes.AlreadyExists:
-			tc = ps.client.Topic(topic)
+			tc = pe.client.Topic(topic)
 		case codes.PermissionDenied:
 			// PermissionDenied may not be fatal if the topic already exists,
 			// but record it in case it turns out not to.
-			ps.topicCreateErr = err
-			tc = ps.client.Topic(topic)
+			pe.topicCreateErr = err
+			tc = pe.client.Topic(topic)
 		default:
-			ps.topicCreateErr = err
+			pe.topicCreateErr = err
 			return nil, err
 		}
 	}
@@ -105,7 +105,7 @@ func (ps *pubsubThinSink) getTopicClient(topic string) (*pubsub.Topic, error) {
 	return tc, nil
 }
 
-func (ps *pubsubThinSink) EmitPayload(payload SinkPayload) error {
+func (pe *pubsubEmitter) EmitPayload(payload SinkPayload) error {
 	pbPayload, ok := payload.(pubsubPayload)
 	if !ok {
 		return errors.Errorf("cannot construct pubsub payload from given sinkPayload")
@@ -116,7 +116,7 @@ func (ps *pubsubThinSink) EmitPayload(payload SinkPayload) error {
 	for _, msg := range pbPayload.messages {
 		topicClient, ok := topics[msg.topic]
 		if !ok {
-			tc, err := ps.getTopicClient(msg.topic)
+			tc, err := pe.getTopicClient(msg.topic)
 			if err != nil {
 				return err
 			}
@@ -124,7 +124,7 @@ func (ps *pubsubThinSink) EmitPayload(payload SinkPayload) error {
 			topicClient = tc
 		}
 
-		res := topicClient.Publish(ps.ctx, &pubsub.Message{
+		res := topicClient.Publish(pe.ctx, &pubsub.Message{
 			Data: msg.content,
 		})
 		results = append(results, res)
@@ -133,10 +133,10 @@ func (ps *pubsubThinSink) EmitPayload(payload SinkPayload) error {
 		tc.Flush()
 	}
 	for _, res := range results {
-		_, err := res.Get(ps.ctx)
-		if status.Code(err) == codes.NotFound && ps.topicCreateErr != nil {
+		_, err := res.Get(pe.ctx)
+		if status.Code(err) == codes.NotFound && pe.topicCreateErr != nil {
 			return errors.WithHint(
-				errors.Wrap(ps.topicCreateErr,
+				errors.Wrap(pe.topicCreateErr,
 					"Topic not found, and attempt to autocreate it failed."),
 				"Create topics in advance or grant this service account the pubsub.editor role on your project.")
 		} else if err != nil {
@@ -146,9 +146,9 @@ func (ps *pubsubThinSink) EmitPayload(payload SinkPayload) error {
 	return nil
 }
 
-func (ps *pubsubThinSink) Close() error {
-	if err := ps.topicNamer.Each(func(topic string) error {
-		t, err := ps.getTopicClient(topic)
+func (pe *pubsubEmitter) Close() error {
+	if err := pe.topicNamer.Each(func(topic string) error {
+		t, err := pe.getTopicClient(topic)
 		if err != nil {
 			return err
 		}
@@ -158,7 +158,7 @@ func (ps *pubsubThinSink) Close() error {
 		return err
 	}
 
-	return ps.client.Close()
+	return pe.client.Close()
 }
 
 type pubsubMessagePayload struct {
@@ -169,13 +169,13 @@ type pubsubPayload struct {
 	messages []pubsubMessagePayload
 }
 
-func makePubsubThinSink(
+func makePubsubEmitter(
 	ctx context.Context,
 	u *url.URL,
 	encodingOpts changefeedbase.EncodingOptions,
 	targets changefeedbase.Targets,
 	knobs *TestingKnobs,
-) (ThinSink, error) {
+) (SinkEmitter, error) {
 	if u.Scheme != GcpScheme {
 		return nil, errors.Errorf("unknown scheme: %s", u.Scheme)
 	}
@@ -216,7 +216,7 @@ func makePubsubThinSink(
 		return nil, err
 	}
 
-	thinSink := &pubsubThinSink{
+	thinSink := &pubsubEmitter{
 		ctx:        ctx,
 		client:     client,
 		topicNamer: topicNamer,
@@ -267,7 +267,7 @@ func makePubsubSink(
 	mb metricsRecorderBuilder,
 	knobs *TestingKnobs,
 ) (Sink, error) {
-	thinSink, err := makePubsubThinSink(ctx, u, encodingOpts, targets, knobs)
+	thinSink, err := makePubsubEmitter(ctx, u, encodingOpts, targets, knobs)
 	if err != nil {
 		return nil, err
 	}

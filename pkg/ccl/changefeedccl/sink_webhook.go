@@ -54,7 +54,7 @@ func makeWebhookSink(
 	source timeutil.TimeSource,
 	mb metricsRecorderBuilder,
 ) (SinkWorker, error) {
-	thinSink, err := makeWebhookThinSink(ctx, u, encodingOpts, opts)
+	thinSink, err := makeWebhookEmitter(ctx, u, encodingOpts, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +66,7 @@ func makeWebhookSink(
 	return makeBatchingWorkerSink(ctx, thinSink, flushCfg, retryOpts, source, mb)
 }
 
-type webhookThinSink struct {
+type webhookEmitter struct {
 	ctx        context.Context
 	format     changefeedbase.FormatType
 	url        sinkURL
@@ -74,14 +74,14 @@ type webhookThinSink struct {
 	client     *httputil.Client
 }
 
-var _ ThinSink = (*webhookThinSink)(nil)
+var _ SinkEmitter = (*webhookEmitter)(nil)
 
-func makeWebhookThinSink(
+func makeWebhookEmitter(
 	ctx context.Context,
 	u sinkURL,
 	encodingOpts changefeedbase.EncodingOptions,
 	opts changefeedbase.WebhookSinkOptions,
-) (ThinSink, error) {
+) (SinkEmitter, error) {
 	err := validateWebhookOpts(u, encodingOpts, opts)
 	if err != nil {
 		return nil, err
@@ -89,7 +89,7 @@ func makeWebhookThinSink(
 
 	u.Scheme = strings.TrimPrefix(u.Scheme, `webhook-`)
 
-	sink := &webhookThinSink{
+	sink := &webhookEmitter{
 		ctx:        ctx,
 		authHeader: opts.AuthHeader,
 		format:     encodingOpts.Format,
@@ -192,30 +192,30 @@ func makeWebhookClient(u sinkURL, timeout time.Duration) (*httputil.Client, erro
 	return client, nil
 }
 
-func (ws *webhookThinSink) makePayloadForBytes(body []byte) (SinkPayload, error) {
-	req, err := http.NewRequestWithContext(ws.ctx, http.MethodPost, ws.url.String(), bytes.NewReader(body))
+func (we *webhookEmitter) makePayloadForBytes(body []byte) (SinkPayload, error) {
+	req, err := http.NewRequestWithContext(we.ctx, http.MethodPost, we.url.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	switch ws.format {
+	switch we.format {
 	case changefeedbase.OptFormatJSON:
 		req.Header.Set("Content-Type", applicationTypeJSON)
 	case changefeedbase.OptFormatCSV:
 		req.Header.Set("Content-Type", applicationTypeCSV)
 	}
 
-	if ws.authHeader != "" {
-		req.Header.Set(authorizationHeader, ws.authHeader)
+	if we.authHeader != "" {
+		req.Header.Set(authorizationHeader, we.authHeader)
 	}
 
 	return req, nil
 }
 
-func (ws *webhookThinSink) EncodeBatch(batch []MessagePayload) (SinkPayload, error) {
+func (we *webhookEmitter) EncodeBatch(batch []MessagePayload) (SinkPayload, error) {
 	var reqBody []byte
 	var err error
 
-	switch ws.format {
+	switch we.format {
 	case changefeedbase.OptFormatJSON:
 		reqBody, err = encodeWebhookMsgJSON(batch)
 	case changefeedbase.OptFormatCSV:
@@ -226,7 +226,7 @@ func (ws *webhookThinSink) EncodeBatch(batch []MessagePayload) (SinkPayload, err
 		return nil, err
 	}
 
-	return ws.makePayloadForBytes(reqBody)
+	return we.makePayloadForBytes(reqBody)
 }
 
 type webhookJsonEvent struct {
@@ -259,15 +259,15 @@ func encodeWebhookMsgCSV(messages []MessagePayload) ([]byte, error) {
 	return mergedMsgs, nil
 }
 
-func (ws *webhookThinSink) EncodeResolvedMessage(
+func (we *webhookEmitter) EncodeResolvedMessage(
 	payload ResolvedMessagePayload,
 ) (SinkPayload, error) {
-	return ws.makePayloadForBytes(payload.body)
+	return we.makePayloadForBytes(payload.body)
 }
 
-func (ws *webhookThinSink) EmitPayload(batch SinkPayload) error {
+func (we *webhookEmitter) EmitPayload(batch SinkPayload) error {
 	req := batch.(*http.Request)
-	res, err := ws.client.Do(req)
+	res, err := we.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -283,8 +283,8 @@ func (ws *webhookThinSink) EmitPayload(batch SinkPayload) error {
 	return nil
 }
 
-func (ws *webhookThinSink) Close() error {
-	ws.client.CloseIdleConnections()
+func (we *webhookEmitter) Close() error {
+	we.client.CloseIdleConnections()
 	return nil
 }
 

@@ -262,16 +262,6 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 		ca.changedRowBuf = &b.buf
 	}
 
-	// SinkWorkers are meant to be used as a factory where a unique sink is used
-	// per eventConsumer worker
-	var sinkFactory SinkWorkerFactory
-	if _, ok := ca.sink.(SinkWorker); ok {
-		sinkFactory = getSinkWorkerFactory(
-			ctx, ca.flowCtx.Cfg, ca.spec.Feed, timestampOracle,
-			ca.spec.User(), ca.spec.JobID, ca.sliMetrics,
-		)
-	}
-
 	// If the initial scan was disabled the highwater would've already been forwarded
 	needsInitialScan := ca.frontier.Frontier().IsEmpty()
 
@@ -294,7 +284,7 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 
 	ca.eventConsumer, ca.sink, err = newEventConsumer(
 		ctx, ca.flowCtx.Cfg, ca.spec, feed, ca.frontier.SpanFrontier(), kvFeedHighWater,
-		ca.sink, sinkFactory, ca.metrics, ca.knobs)
+		ca.sink, ca.metrics, ca.knobs)
 
 	if err != nil {
 		// Early abort in the case that there is an error setting up the consumption.

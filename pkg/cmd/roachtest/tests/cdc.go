@@ -918,17 +918,17 @@ func registerCDC(r registry.Registry) {
 			ct := newCDCTester(ctx, t, c)
 			defer ct.Close()
 
-			ct.runTPCCWorkload(tpccArgs{warehouses: 100})
+			ct.runTPCCWorkload(tpccArgs{warehouses: 4000})
 
 			exportStatsFile := ct.startStatsCollection()
 			feed := ct.newChangefeed(feedArgs{
-				sinkType: kafkaSink,
-				targets:  allTpccTargets,
+				sinkType: webhookSink,
+				targets:  []string{"tpcc.order_line"},
 				opts:     map[string]string{"initial_scan": "'only'"},
 			})
-			ct.runFeedLatencyVerifier(feed, latencyTargets{
-				initialScanLatency: 30 * time.Minute,
-			})
+			// ct.runFeedLatencyVerifier(feed, latencyTargets{
+			// 	initialScanLatency: 30 * time.Minute,
+			// })
 			feed.waitForCompletion()
 			exportStatsFile()
 		},

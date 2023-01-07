@@ -90,7 +90,6 @@ func newEventConsumer(
 	spanFrontier *span.Frontier,
 	cursor hlc.Timestamp,
 	sink EventSink,
-	sinkFactory SinkWorkerFactory,
 	metrics *Metrics,
 	knobs TestingKnobs,
 ) (eventConsumer, EventSink, error) {
@@ -177,19 +176,10 @@ func newEventConsumer(
 		workerCh:     make([]chan kvevent.Event, numWorkers),
 		workerChSize: changefeedbase.EventConsumerWorkerQueueSize.Get(&cfg.Settings.SV),
 		spanFrontier: spanFrontier,
-		sinkWorkers:  make([]SinkWorker, numWorkers),
 	}
 	ss := &safeSink{wrapped: sink}
 
 	c.makeConsumer = func(workerId int64) (eventConsumer, error) {
-		if sinkFactory != nil {
-			sinkWorker, err := sinkFactory.MakeEventSink()
-			c.sinkWorkers[workerId] = sinkWorker
-			if err != nil {
-				return nil, err
-			}
-			return makeConsumer(sinkWorker, c)
-		}
 		return makeConsumer(ss, c)
 	}
 
@@ -300,14 +290,14 @@ func (c *kvEventToRowConsumer) ConsumeEvent(ctx context.Context, ev kvevent.Even
 		return false, errors.AssertionFailedf("expected kv ev, got %v", ev.Type())
 	}
 
-	// Request CPU time to use for event consumption, block if this time is
-	// unavailable. If there is unused CPU time left from the last call to
-	// Pace, then use that time instead of blocking.
-	if err := c.pacer.Pace(ctx); err != nil {
-		if pacerLogEvery.ShouldLog() {
-			log.Errorf(ctx, "automatic pacing: %v", err)
-		}
-	}
+	// // Request CPU time to use for event consumption, block if this time is
+	// // unavailable. If there is unused CPU time left from the last call to
+	// // Pace, then use that time instead of blocking.
+	// if err := c.pacer.Pace(ctx); err != nil {
+	// 	if pacerLogEvery.ShouldLog() {
+	// 		log.Errorf(ctx, "automatic pacing: %v", err)
+	// 	}
+	// }
 
 	schemaTimestamp := ev.KV().Value.Timestamp
 	prevSchemaTimestamp := schemaTimestamp
@@ -494,8 +484,6 @@ type parallelEventConsumer struct {
 	// which encodes and emits events.
 	makeConsumer func(int64) (eventConsumer, error)
 
-	sinkWorkers []SinkWorker
-
 	// numWorkers is the number of worker threads.
 	numWorkers int64
 	// workerCh stores the event buffer for each worker.
@@ -585,14 +573,8 @@ func (c *parallelEventConsumer) startWorkers() error {
 		// the worker.
 		id := i
 		consumer := consumers[i]
-		var successCh chan int
-		var errorCh chan error
-		if c.sinkWorkers[i] != nil {
-			successCh = c.sinkWorkers[i].Successes()
-			errorCh = c.sinkWorkers[i].Errors()
-		}
 		workerClosure := func(ctx2 context.Context) error {
-			return c.workerLoop(ctx2, consumer, id, successCh, errorCh)
+			return c.workerLoop(ctx2, consumer, id)
 		}
 		c.g.GoCtx(workerClosure)
 	}
@@ -600,7 +582,7 @@ func (c *parallelEventConsumer) startWorkers() error {
 }
 
 func (c *parallelEventConsumer) workerLoop(
-	ctx context.Context, consumer eventConsumer, id int64, successCh chan int, errorCh chan error,
+	ctx context.Context, consumer eventConsumer, id int64,
 ) error {
 	defer func() {
 		err := consumer.Close()
@@ -624,13 +606,9 @@ func (c *parallelEventConsumer) workerLoop(
 			if err != nil {
 				return c.setWorkerError(err)
 			}
-			if !emitted || successCh == nil {
+			if !emitted {
 				c.decInFlight(1)
 			}
-		case numFlushed := <-successCh:
-			c.decInFlight(numFlushed)
-		case err := <-errorCh:
-			return c.setWorkerError(err)
 		}
 	}
 }
@@ -717,14 +695,6 @@ func (c *parallelEventConsumer) Close() error {
 	close(c.doneCh)
 	if err := c.g.Wait(); err != nil {
 		return err
-	}
-
-	for _, sinkWorker := range c.sinkWorkers {
-		if sinkWorker != nil {
-			if err := sinkWorker.Close(); err != nil {
-				return err
-			}
-		}
 	}
 
 	return nil
