@@ -8,6 +8,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
 type AsyncSink interface {
@@ -19,16 +20,17 @@ type AsyncSink interface {
 type parallelSinkEmitter struct {
 	ctx context.Context
 
-	client SinkClient
-
+	client    SinkClient
 	batchCfg  sinkBatchConfig
 	retryOpts retry.Options
-
 	successCh chan int
 	errorCh   chan error
 
-	topicNamer    *TopicNamer
-	topicEmitters map[string]parallelTopicEmitter
+	topicNamer *TopicNamer
+
+	workerCh   []chan rowPayload
+	numWorkers int64
+	hasher     hash.Hash32
 
 	wg      ctxgroup.Group
 	doneCh  chan struct{}
@@ -45,19 +47,18 @@ func (pse *parallelSinkEmitter) Successes() chan int {
 	return pse.successCh
 }
 
-func (pse *parallelSinkEmitter) EmitRow(
-	ctx context.Context,
-	topic TopicDescriptor,
-	key, value []byte,
-	updated, mvcc hlc.Timestamp,
-	alloc kvevent.Alloc,
-) error {
-	// Just insert into the appropiate topic producer
-	return nil
-}
-
 func (pse *parallelSinkEmitter) Flush(ctx context.Context) error {
 	// Tell each topic producer to flush
+	for _, workerCh := range pse.workerCh {
+		select {
+		case <-pse.ctx.Done():
+			return pse.ctx.Err()
+		case <-pse.doneCh:
+			return nil
+		case workerCh <- rowPayload{shouldFlush: true}:
+			return nil
+		}
+	}
 	return nil
 }
 
@@ -70,74 +71,103 @@ func (pse *parallelSinkEmitter) Dial() error {
 	return nil
 }
 
-type parallelTopicEmitter struct {
-	ctx        context.Context
-	numWorkers int64
-	workerCh   []chan rowPayload
-	hasher     hash.Hash32
-	wg         ctxgroup.Group
-	doneCh     chan struct{}
-}
-
-func makeTopicEmitter(
+func makeParallelSinkEmitter(
 	ctx context.Context,
+	client SinkClient,
+	config sinkBatchConfig,
+	retryOpts retry.Options,
 	numWorkers int64,
-	emitterFactory func() batchedSinkEmitter,
-) *parallelTopicEmitter {
-	pte := &parallelTopicEmitter{
-		ctx:        ctx,
-		numWorkers: numWorkers,
+	metrics metricsRecorder,
+) AsyncSink {
+	pse := &parallelSinkEmitter{
+		ctx:       ctx,
+		client:    client,
+		batchCfg:  config,
+		retryOpts: retryOpts,
+		// TODO: TopicNamer
+
+		successCh: make(chan int, 256),
+		errorCh:   make(chan error, 1),
+
 		workerCh:   make([]chan rowPayload, numWorkers),
+		numWorkers: numWorkers,
 		hasher:     makeHasher(),
-		wg:         ctxgroup.WithContext(ctx),
-		doneCh:     make(chan struct{}),
+
+		wg:      ctxgroup.WithContext(ctx),
+		doneCh:  make(chan struct{}),
+		metrics: metrics,
 	}
 
-	for worker := int64(0); worker < pte.numWorkers; worker++ {
+	for worker := int64(0); worker < pse.numWorkers; worker++ {
 		workerCh := make(chan rowPayload, 256)
-		emitter := emitterFactory()
-		pte.wg.GoCtx(func(ctx context.Context) error {
-			return pte.workerLoop(workerCh, emitter)
+		pse.wg.GoCtx(func(ctx context.Context) error {
+			return pse.workerLoop(workerCh)
 		})
-		pte.workerCh[worker] = workerCh
+		pse.workerCh[worker] = workerCh
 	}
 
-	return pte
+	return pse
 }
 
-func (pte *parallelTopicEmitter) workerLoop(input chan rowPayload, emitter batchedSinkEmitter) error {
+func (pse *parallelSinkEmitter) EmitRow(
+	ctx context.Context,
+	topic TopicDescriptor,
+	key, value []byte,
+	updated, mvcc hlc.Timestamp,
+	alloc kvevent.Alloc,
+) error {
+	payload := rowPayload{
+		msg: messagePayload{
+			key: key,
+			val: value,
+		},
+		mvcc:  mvcc,
+		alloc: alloc,
+		topic: topic,
+	}
+	workerId := pse.workerIndex(payload)
+	select {
+	case <-pse.ctx.Done():
+		return pse.ctx.Err()
+	case <-pse.doneCh:
+		return nil
+	case pse.workerCh[workerId] <- payload:
+		return nil
+	}
+}
+
+func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
+	emitter := makeBatchedSinkEmitter(
+		pse.ctx,
+		pse.client,
+		pse.batchCfg,
+		pse.retryOpts,
+		pse.successCh,
+		pse.errorCh,
+		timeutil.DefaultTimeSource{},
+		pse.metrics,
+	)
 	for {
 		select {
-		case <-pte.ctx.Done():
-			return pte.ctx.Err()
-		case <-pte.doneCh:
+		case <-pse.ctx.Done():
+			return pse.ctx.Err()
+		case <-pse.doneCh:
 			return nil
 		case row := <-input:
 			emitter.Emit(row)
 		}
 	}
-	return nil
 }
 
-func (pte *parallelTopicEmitter) Emit(payload rowPayload) {
-	workerId := pte.workerIndex(payload)
-	select {
-	case <-pte.ctx.Done():
-		return
-	case <-pte.doneCh:
-		return
-	case pte.workerCh[workerId] <- payload:
-		return
-	}
+func (pse *parallelSinkEmitter) workerIndex(row rowPayload) int64 {
+	pse.hasher.Reset()
+	pse.hasher.Write(row.msg.key)
+	return int64(pse.hasher.Sum32()) % pse.numWorkers
 }
 
-func (pte *parallelTopicEmitter) workerIndex(row rowPayload) int64 {
-	pte.hasher.Reset()
-	pte.hasher.Write(row.msg.key)
-	return int64(pte.hasher.Sum32()) % pte.numWorkers
-}
-
-func (pse *parallelSinkEmitter) EmitResolvedTimestamp(ctx context.Context, encoder Encoder, resolved hlc.Timestamp) error {
+func (pse *parallelSinkEmitter) EmitResolvedTimestamp(
+	ctx context.Context, encoder Encoder, resolved hlc.Timestamp,
+) error {
 	data, err := encoder.EncodeResolvedTimestamp(ctx, "", resolved)
 	if err != nil {
 		return err
@@ -165,43 +195,3 @@ func (pse *parallelSinkEmitter) EmitResolvedTimestamp(ctx context.Context, encod
 	}
 	return nil
 }
-
-// TODO: These goes into the parallel sink
-// func (bs *batchedSinkEmitter) EmitRow(
-// 	ctx context.Context,
-// 	topic TopicDescriptor,
-// 	key, value []byte,
-// 	updated, mvcc hlc.Timestamp,
-// 	alloc kvevent.Alloc,
-// ) error {
-// 	bs.rowCh <- rowPayload{
-// 		msg: messagePayload{
-// 			key:   key,
-// 			val:   value,
-// 			topic: topic,
-// 		},
-// 		mvcc:  mvcc,
-// 		alloc: alloc,
-// 	}
-// 	return nil
-// }
-//
-// func (bs *batchedSinkEmitter) EmitResolvedTimestamp(
-// 	ctx context.Context, encoder Encoder, resolved hlc.Timestamp,
-// ) error {
-// 	defer bs.metrics.recordResolvedCallback()()
-//
-// 	data, err := encoder.EncodeResolvedTimestamp(ctx, "", resolved)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	payload, err := bs.se.EncodeResolvedMessage(resolvedMessagePayload{
-// 		resolvedTs: resolved,
-// 		body:       data,
-// 	})
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return bs.sendWithRetries(payload, 1)
-// }
-//

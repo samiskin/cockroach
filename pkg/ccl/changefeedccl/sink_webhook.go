@@ -54,17 +54,24 @@ func makeWebhookSink(
 	source timeutil.TimeSource,
 	mb metricsRecorderBuilder,
 ) (Sink, error) {
-	return nil, nil
-	// thinSink, err := makeWebhookEmitter(ctx, u, encodingOpts, opts)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	//
-	// flushCfg, retryOpts, err := getSinkConfigFromJson(opts.JSONConfig)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// return makeSinkBatcher(ctx, thinSink, flushCfg, retryOpts, source, mb)
+	sinkClient, err := makeWebhookSinkClient(ctx, u, encodingOpts, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	flushCfg, retryOpts, err := getSinkConfigFromJson(opts.JSONConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	return makeParallelSinkEmitter(
+		ctx,
+		sinkClient,
+		flushCfg,
+		retryOpts,
+		int64(64),
+		mb(requiresResourceAccounting),
+	), nil
 }
 
 type webhookEmitter struct {
@@ -77,7 +84,7 @@ type webhookEmitter struct {
 
 var _ SinkClient = (*webhookEmitter)(nil)
 
-func makeWebhookEmitter(
+func makeWebhookSinkClient(
 	ctx context.Context,
 	u sinkURL,
 	encodingOpts changefeedbase.EncodingOptions,

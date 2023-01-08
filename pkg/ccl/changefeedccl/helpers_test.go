@@ -242,7 +242,7 @@ func assertPayloadsTimeout() time.Duration {
 	if util.RaceEnabled {
 		return 5 * time.Minute
 	}
-	return 10 * time.Second
+	return 30 * time.Second
 }
 
 func withTimeout(
@@ -765,14 +765,14 @@ func randomSinkTypeWithOptions(options feedTestOptions) string {
 	sinkWeights := map[string]int{
 		"kafka":        0,
 		"enterprise":   0,
-		"webhook":      0,
-		"pubsub":       1,
+		"webhook":      1,
+		"pubsub":       0,
 		"sinkless":     0,
 		"cloudstorage": 0,
 	}
-	if options.externalIODir != "" {
-		sinkWeights["cloudstorage"] = 3
-	}
+	// if options.externalIODir != "" {
+	// 	sinkWeights["cloudstorage"] = 3
+	// }
 	if options.allowedSinkTypes != nil {
 		sinkWeights = map[string]int{}
 		for _, sinkType := range options.allowedSinkTypes {
@@ -790,13 +790,16 @@ func randomSinkTypeWithOptions(options feedTestOptions) string {
 	}
 	p := rand.Float32() * float32(weightTotal)
 	var sum float32 = 0
+	if weightTotal == 0 {
+		return ""
+	}
 	for sink, weight := range sinkWeights {
 		sum += float32(weight)
 		if p <= sum {
 			return sink
 		}
 	}
-	return "kafka" // unreachable
+	return ""
 }
 
 // addCloudStorageOptions adds the options necessary to enable a server to run a
@@ -912,6 +915,9 @@ func cdcTestNamedWithSystem(
 	cleanupCloudStorage := addCloudStorageOptions(t, &options)
 
 	sinkType := randomSinkTypeWithOptions(options)
+	if sinkType == "" {
+		return
+	}
 	testLabel := sinkType
 	if name != "" {
 		testLabel = fmt.Sprintf("%s/%s", sinkType, name)

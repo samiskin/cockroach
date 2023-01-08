@@ -177,13 +177,18 @@ func newEventConsumer(
 		workerChSize: changefeedbase.EventConsumerWorkerQueueSize.Get(&cfg.Settings.SV),
 		spanFrontier: spanFrontier,
 	}
-	ss := &safeSink{wrapped: sink}
+	ss := sink
+	_, isAsyncSink := sink.(AsyncSink)
+	if !isAsyncSink {
+		ss = &safeSink{wrapped: sink}
+	}
+	c.sink = ss
 
 	c.makeConsumer = func(workerId int64) (eventConsumer, error) {
 		return makeConsumer(ss, c)
 	}
 
-	if err := c.startWorkers(); err != nil {
+	if err := c.startWorkers(sink); err != nil {
 		return nil, nil, err
 	}
 	return c, ss, nil
@@ -496,6 +501,8 @@ type parallelEventConsumer struct {
 	// that spawned this event consumer.
 	spanFrontier *span.Frontier
 
+	sink EventSink
+
 	// termErr and termCh are used to save the first error that occurs
 	// in any worker and signal all workers to stop.
 	//
@@ -552,7 +559,7 @@ func (c *parallelEventConsumer) getBucketForEvent(ev kvevent.Event) int64 {
 	return int64(c.hasher.Sum32()) % c.numWorkers
 }
 
-func (c *parallelEventConsumer) startWorkers() error {
+func (c *parallelEventConsumer) startWorkers(sink EventSink) error {
 	// Create the consumers in a separate loop so that returning
 	// in case of an error is simple and does not require
 	// shutting down goroutines.
@@ -565,6 +572,13 @@ func (c *parallelEventConsumer) startWorkers() error {
 		consumers[i] = consumer
 	}
 
+	asyncSink, isAsyncSink := sink.(AsyncSink)
+	if isAsyncSink {
+		c.g.GoCtx(func(ctx2 context.Context) error {
+			return c.asyncSinkWorkerLoop(ctx2, asyncSink)
+		})
+	}
+
 	for i := int64(0); i < c.numWorkers; i++ {
 		c.workerCh[i] = make(chan kvevent.Event, c.workerChSize)
 
@@ -574,15 +588,34 @@ func (c *parallelEventConsumer) startWorkers() error {
 		id := i
 		consumer := consumers[i]
 		workerClosure := func(ctx2 context.Context) error {
-			return c.workerLoop(ctx2, consumer, id)
+			return c.workerLoop(ctx2, consumer, id, isAsyncSink)
 		}
 		c.g.GoCtx(workerClosure)
 	}
 	return nil
 }
 
+func (c *parallelEventConsumer) asyncSinkWorkerLoop(ctx context.Context, asyncSink AsyncSink) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-c.doneCh:
+			return nil
+		case <-c.termCh:
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			return c.mu.termErr
+		case flushed := <-asyncSink.Successes():
+			c.decInFlight(flushed)
+		case err := <-asyncSink.Errors():
+			return c.setWorkerError(err)
+		}
+	}
+}
+
 func (c *parallelEventConsumer) workerLoop(
-	ctx context.Context, consumer eventConsumer, id int64,
+	ctx context.Context, consumer eventConsumer, id int64, asyncConfirmation bool,
 ) error {
 	defer func() {
 		err := consumer.Close()
@@ -606,7 +639,7 @@ func (c *parallelEventConsumer) workerLoop(
 			if err != nil {
 				return c.setWorkerError(err)
 			}
-			if !emitted {
+			if !asyncConfirmation || !emitted {
 				c.decInFlight(1)
 			}
 		}
@@ -664,6 +697,11 @@ func (c *parallelEventConsumer) Flush(ctx context.Context) error {
 
 	if !needFlush() {
 		return nil
+	}
+
+	// TODO: Make the sink flush itself
+	if _, ok := c.sink.(AsyncSink); ok {
+		_ := c.sink.Flush(ctx)
 	}
 
 	select {

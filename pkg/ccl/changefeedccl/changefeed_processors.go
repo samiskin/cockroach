@@ -280,7 +280,10 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 		ca.cancel()
 		return
 	}
-	ca.sink = &errorWrapperSink{wrapped: ca.sink}
+
+	if _, ok := ca.sink.(AsyncSink); !ok {
+		ca.sink = &errorWrapperSink{wrapped: ca.sink}
+	}
 
 	ca.eventConsumer, ca.sink, err = newEventConsumer(
 		ctx, ca.flowCtx.Cfg, ca.spec, feed, ca.frontier.SpanFrontier(), kvFeedHighWater,

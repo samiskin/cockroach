@@ -45,7 +45,6 @@ func (pe *pubsubEmitter) EncodeBatch(msgs []messagePayload) (SinkPayload, error)
 	// 			Value: msg.val,
 	// 			Topic: topicName,
 	// 		})
-	// 		// fmt.Printf("\x1b[32m ENCODE MSG (%+v)\x1b[0m\n", string(content))
 	// 		if err != nil {
 	// 			return nil, err
 	// 		}
@@ -61,7 +60,9 @@ func (pe *pubsubEmitter) EncodeBatch(msgs []messagePayload) (SinkPayload, error)
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
-func (pe *pubsubEmitter) EncodeResolvedMessage(payload resolvedMessagePayload) (SinkPayload, error) {
+func (pe *pubsubEmitter) EncodeResolvedMessage(
+	payload resolvedMessagePayload,
+) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0)
 	if err := pe.topicNamer.Each(func(topic string) error {
 		sinkMessages = append(sinkMessages, pubsubMessagePayload{

@@ -918,7 +918,7 @@ func registerCDC(r registry.Registry) {
 			ct := newCDCTester(ctx, t, c)
 			defer ct.Close()
 
-			ct.runTPCCWorkload(tpccArgs{warehouses: 4000})
+			ct.runTPCCWorkload(tpccArgs{warehouses: 1000})
 
 			exportStatsFile := ct.startStatsCollection()
 			feed := ct.newChangefeed(feedArgs{

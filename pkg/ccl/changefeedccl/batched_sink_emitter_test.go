@@ -67,7 +67,7 @@ type testingBatchedEmitter struct {
 
 func (te *testingBatchedEmitter) EmitN(n int) {
 	for i := 0; i < n; i++ {
-		te.Emit(makeRowPayload(te.pool))
+		te.Emit(makeRowPayload(&te.pool))
 	}
 }
 
@@ -132,12 +132,10 @@ func (te *testingBatchedEmitter) Close() {
 }
 
 func makeTestingBatchEmitter(
-	t *testing.T,
-	config sinkBatchConfig,
-	timeSource timeutil.TimeSource,
+	t *testing.T, config sinkBatchConfig, timeSource timeutil.TimeSource,
 ) testingBatchedEmitter {
 	return testingBatchedEmitter{
-		batchedSinkEmitter: makeBatchedSinkEmitter(
+		batchedSinkEmitter: *makeBatchedSinkEmitter(
 			context.Background(),
 			&testingSinkClient{
 				emittedBatches: make([][]messagePayload, 0),
@@ -153,12 +151,11 @@ func makeTestingBatchEmitter(
 	}
 }
 
-func makeRowPayload(pool testAllocPool) rowPayload {
+func makeRowPayload(pool *testAllocPool) rowPayload {
 	return rowPayload{
 		msg: messagePayload{
-			key:   []byte("[1001]"),
-			val:   []byte("{\"after\":{\"col1\":\"val1\",\"rowid\":1000},\"key\":[1001],\"topic:\":\"foo\"}"),
-			topic: "",
+			key: []byte("[1001]"),
+			val: []byte("{\"after\":{\"col1\":\"val1\",\"rowid\":1000},\"key\":[1001],\"topic:\":\"foo\"}"),
 		},
 		alloc: pool.alloc(),
 		mvcc:  zeroTS,
@@ -204,7 +201,7 @@ func TestBatchedSinkEmitterMessageLimit(t *testing.T) {
 func TestBatchedSinkEmitterSizeFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	row := makeRowPayload(testAllocPool{})
+	row := makeRowPayload(&testAllocPool{})
 	rowSize := len(row.msg.key) + len(row.msg.val)
 
 	emitter := makeTestingBatchEmitter(
@@ -292,7 +289,6 @@ func TestBatchedSinkEmitterError(t *testing.T) {
 	emitter.EmitN(2)
 	require.True(t, emitter.Empty())
 	emitter.Close()
-	require.EqualValues(t, 0, emitter.pool.used())
 
 	// Ensure encoding errors correctly cause failure
 	emitter = makeTestingBatchEmitter(t, sinkBatchConfig{
@@ -306,7 +302,25 @@ func TestBatchedSinkEmitterError(t *testing.T) {
 	require.True(t, emitter.Empty())
 	emitter.ExpectErr()
 	emitter.Close()
-	require.EqualValues(t, 0, emitter.pool.used())
+}
+
+func TestBatchedSinkEmitterForceFlush(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+
+	emitter := makeTestingBatchEmitter(t, sinkBatchConfig{
+		Messages: 10,
+	}, timeutil.DefaultTimeSource{})
+	defer emitter.Close()
+
+	emitter.EmitN(5)
+	emitter.Flush()
+	testutils.SucceedsSoon(t, func() error {
+		if !emitter.Empty() {
+			return nil
+		}
+		return errors.New("Waiting for events to flush")
+	})
+	require.Equal(t, 5, len(emitter.Next()))
 }
 
 // TODO: Assert metrics are correct

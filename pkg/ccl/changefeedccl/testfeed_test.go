@@ -48,6 +48,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
+	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -169,11 +170,10 @@ type sinklessFeed struct {
 var _ cdctest.TestFeed = (*sinklessFeed)(nil)
 
 func timeout() time.Duration {
-	return 5 * time.Second
-	// if util.RaceEnabled {
-	// 	return 5 * time.Minute
-	// }
-	// return 30 * time.Second
+	if util.RaceEnabled {
+		return 5 * time.Minute
+	}
+	return 30 * time.Second
 }
 
 // Partitions implements the TestFeed interface.
@@ -551,30 +551,6 @@ func (s *notifyFlushSink) EncodeAndEmitRow(
 }
 
 var _ Sink = (*notifyFlushSink)(nil)
-
-type notifyFlushSinkClient struct {
-	SinkClient
-	sync      *sinkSynchronizer
-	successCh chan int
-}
-
-func (s *notifyFlushSinkClient) watchSuccesses(shutdown chan struct{}) {
-	for {
-		select {
-		// case numFlushed := <-s.SinkClient.Successes():
-		// 	s.sync.addFlush()
-		// 	s.successCh <- numFlushed
-		case <-shutdown:
-			return
-		}
-	}
-}
-
-func (s *notifyFlushSinkClient) Successes() chan int {
-	return s.successCh
-}
-
-var _ SinkClient = (*notifyFlushSinkClient)(nil)
 
 // feedInjectable is the subset of the
 // TestServerInterface/TestTenantInterface needed for depInjector to
@@ -1934,9 +1910,9 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 	ss := &sinkSynchronizer{}
 
 	wrapSink := func(s Sink) Sink {
-		// if sinkWorker, ok := s.(SinkClient); ok {
-		// 	return wrapSinkClient(sinkWorker, &wg, done, ss)
-		// }
+		if asyncSink, ok := s.(AsyncSink); ok {
+			return wrapAsyncSink(asyncSink, &wg, done, ss)
+		}
 		return s
 	}
 
@@ -1956,19 +1932,36 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 	return c, nil
 }
 
-func wrapSinkClient(sinkWorker SinkClient, wg *sync.WaitGroup, doneCh chan struct{}, ss *sinkSynchronizer) SinkClient {
-	notifyWorker := notifyFlushSinkClient{
-		SinkClient: sinkWorker,
-		sync:       ss,
-		successCh:  make(chan int, 256),
-	}
+type notifyFlushAsyncSink struct {
+	AsyncSink
+	successCh chan int
+}
 
+func (nas *notifyFlushAsyncSink) Successes() chan int {
+	return nas.successCh
+}
+
+func wrapAsyncSink(
+	sink AsyncSink, wg *sync.WaitGroup, doneCh chan struct{}, ss *sinkSynchronizer,
+) AsyncSink {
 	wg.Add(1)
+	notifySink := notifyFlushAsyncSink{
+		AsyncSink: sink,
+		successCh: make(chan int, 256),
+	}
 	go func() {
 		defer wg.Done()
-		notifyWorker.watchSuccesses(doneCh)
+		for {
+			select {
+			case flushed := <-sink.Successes():
+				ss.addFlush()
+				notifySink.successCh <- flushed
+			case <-doneCh:
+				return
+			}
+		}
 	}()
-	return &notifyWorker
+	return &notifySink
 }
 
 func (f *webhookFeedFactory) Server() serverutils.TestTenantInterface {
@@ -2336,16 +2329,29 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	var wg sync.WaitGroup
 	done := make(chan struct{})
 	ss := &sinkSynchronizer{}
+	// wrapSink := func(s Sink) Sink {
+	// 	if asyncSink, ok := s.(AsyncSink); ok {
+	// 		return wrapAsyncSink(asyncSink, &wg, done, ss)
+	// 	}
+	// 	return s
+	// }
+	client := &fakePubsubClient{
+		buffer: &mockPubsubMessageBuffer{
+			rows: make([]mockPubsubMessage, 0),
+		},
+	}
 	wrapSink := func(s Sink) Sink {
-		// if sinkWorker, ok := s.(SinkClient); ok {
-		// 	return wrapSinkClient(sinkWorker, &wg, done, ss)
-		// }
-		return s
+		return &fakePubsubSink{
+			Sink:   s,
+			client: client,
+			sync:   ss,
+		}
 	}
 
 	c := &pubsubFeed{
 		jobFeed:        newJobFeed(p.jobsTableConn(), wrapSink),
 		seenTrackerMap: make(map[string]struct{}),
+		client:         client,
 		ss:             ss,
 		doneCh:         done,
 		wg:             &wg,
@@ -2405,7 +2411,8 @@ func extractJSONMessagePubsub(wrapped []byte) (value []byte, key []byte, topic s
 // Next implements TestFeed
 func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 	for {
-		msg := p.mockServer.Pop()
+		// msg := p.mockServer.Pop()
+		msg := p.client.buffer.pop()
 		if msg != nil {
 			details, err := p.Details()
 			if err != nil {
@@ -2448,8 +2455,8 @@ func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 					return ctx.Err()
 				case <-p.ss.eventReady():
 					return nil
-				case <-p.mockServer.NotifyMessage():
-					return nil
+				// case <-p.mockServer.NotifyMessage():
+				// 	return nil
 				case <-p.shutdown:
 					return p.terminalJobError()
 				}
@@ -2462,7 +2469,6 @@ func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 
 // Close implements TestFeed
 func (p *pubsubFeed) Close() error {
-	// fmt.Printf("\x1b[33m CLOSE \x1b[0m\n")
 	err := p.jobFeed.Close()
 	if err != nil {
 		return err

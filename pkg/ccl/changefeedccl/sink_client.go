@@ -24,9 +24,8 @@ type SinkPayload interface{}
 
 // messagePayload represents a KV event to be emitted.
 type messagePayload struct {
-	key   []byte
-	val   []byte
-	topic string
+	key []byte
+	val []byte
 }
 
 // resolvedMessagePayload represents a Resolved event to be emitted.
@@ -36,7 +35,14 @@ type resolvedMessagePayload struct {
 	topic      string
 }
 
-func emitWithRetries(ctx context.Context, payload SinkPayload, numMessages int, emitter SinkClient, opts retry.Options, metrics metricsRecorder) error {
+func emitWithRetries(
+	ctx context.Context,
+	payload SinkPayload,
+	numMessages int,
+	emitter SinkClient,
+	opts retry.Options,
+	metrics metricsRecorder,
+) error {
 	initialSend := true
 	return retry.WithMaxAttempts(ctx, opts, opts.MaxRetries+1, func() error {
 		if !initialSend {

@@ -28,7 +28,7 @@ type batchedSinkEmitter struct {
 
 	mu struct {
 		syncutil.RWMutex
-		err error
+		termErr error
 	}
 	doneCh     chan struct{}
 	wg         ctxgroup.Group
@@ -45,7 +45,7 @@ func makeBatchedSinkEmitter(
 	errorCh chan error,
 	timeSource timeutil.TimeSource,
 	metrics metricsRecorder,
-) batchedSinkEmitter {
+) *batchedSinkEmitter {
 	bs := batchedSinkEmitter{
 		ctx:       ctx,
 		sc:        sink,
@@ -69,13 +69,15 @@ func makeBatchedSinkEmitter(
 		return bs.startBatchWorker()
 	})
 
-	return bs
+	return &bs
 }
 
 type rowPayload struct {
-	msg   messagePayload
-	alloc kvevent.Alloc
-	mvcc  hlc.Timestamp
+	msg         messagePayload
+	alloc       kvevent.Alloc
+	mvcc        hlc.Timestamp
+	topic       TopicDescriptor
+	shouldFlush bool
 }
 
 func (bs *batchedSinkEmitter) Emit(payload rowPayload) {
@@ -95,7 +97,7 @@ func (bs *batchedSinkEmitter) Flush() {
 		return
 	case <-bs.doneCh:
 		return
-	case bs.forceFlushCh <- struct{}{}:
+	case bs.rowCh <- rowPayload{shouldFlush: true}:
 		return
 	}
 }
@@ -108,8 +110,8 @@ func (bs *batchedSinkEmitter) Close() error {
 func (bs *batchedSinkEmitter) handleError(err error) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
-	if bs.mu.err == nil {
-		bs.mu.err = changefeedbase.MarkRetryableError(err)
+	if bs.mu.termErr == nil {
+		bs.mu.termErr = changefeedbase.MarkRetryableError(err)
 	} else {
 		return
 	}
@@ -119,7 +121,7 @@ func (bs *batchedSinkEmitter) handleError(err error) {
 		return
 	case <-bs.doneCh:
 		return
-	case bs.errorCh <- bs.mu.err:
+	case bs.errorCh <- bs.mu.termErr:
 		return
 	}
 }
@@ -187,6 +189,14 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 		case <-bs.doneCh:
 			return nil
 		case rowMsg := <-bs.rowCh:
+			if bs.isTerminated() {
+				continue
+			}
+			// TODO: Mkae tihs cleaner and remove forceFlushCh
+			if rowMsg.shouldFlush {
+				flushBatch()
+				continue
+			}
 			bs.metrics.recordMessageSize(int64(len(rowMsg.msg.key) + len(rowMsg.msg.val)))
 
 			// If the batch is about to no longer be empty, start the flush timer
@@ -208,6 +218,12 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 	}
 }
 
+func (bs *batchedSinkEmitter) isTerminated() bool {
+	bs.mu.RLock()
+	defer bs.mu.RUnlock()
+	return bs.mu.termErr != nil
+}
+
 func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) error {
 	for {
 		select {
@@ -217,13 +233,9 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) e
 			return nil
 		case batch := <-batchCh:
 			// Never emit messages if an error has occured as ordering guarantees may be compromised
-			bs.mu.RLock()
-			if bs.mu.err != nil {
-				bs.mu.RUnlock()
-				batch.alloc.Release(bs.ctx)
+			if bs.isTerminated() {
 				continue
 			}
-			bs.mu.RUnlock()
 
 			flushCallback := bs.metrics.recordFlushRequestCallback()
 			err := emitWithRetries(bs.ctx, batch.sinkPayload, batch.numMessages, bs.sc, bs.retryOpts, bs.metrics)
