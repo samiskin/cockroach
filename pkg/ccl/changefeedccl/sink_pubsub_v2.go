@@ -2,7 +2,6 @@ package changefeedccl
 
 import (
 	"context"
-	"encoding/json"
 	"net/url"
 	"time"
 
@@ -28,41 +27,41 @@ type pubsubEmitter struct {
 	topicCreateErr error
 }
 
-var _ SinkEmitter = (*pubsubEmitter)(nil)
+var _ SinkClient = (*pubsubEmitter)(nil)
 
-func (pe *pubsubEmitter) EncodeBatch(msgs []MessagePayload) (SinkPayload, error) {
+func (pe *pubsubEmitter) EncodeBatch(msgs []messagePayload) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0, len(msgs))
-	for _, msg := range msgs {
-		var content []byte
-		var err error
-		topicName, err := pe.topicNamer.Name(msg.topic)
-		if err != nil {
-			return nil, err
-		}
-		switch pe.format {
-		case changefeedbase.OptFormatJSON:
-			content, err = json.Marshal(jsonPayload{
-				Key:   msg.key,
-				Value: msg.val,
-				Topic: topicName,
-			})
-			// fmt.Printf("\x1b[32m ENCODE MSG (%+v)\x1b[0m\n", string(content))
-			if err != nil {
-				return nil, err
-			}
-		case changefeedbase.OptFormatCSV:
-			content = msg.val
-		}
-
-		sinkMessages = append(sinkMessages, pubsubMessagePayload{
-			content: content,
-			topic:   topicName,
-		})
-	}
+	// for _, msg := range msgs {
+	// 	var content []byte
+	// 	var err error
+	// 	topicName, err := pe.topicNamer.Name(msg.topic)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	switch pe.format {
+	// 	case changefeedbase.OptFormatJSON:
+	// 		content, err = json.Marshal(jsonPayload{
+	// 			Key:   msg.key,
+	// 			Value: msg.val,
+	// 			Topic: topicName,
+	// 		})
+	// 		// fmt.Printf("\x1b[32m ENCODE MSG (%+v)\x1b[0m\n", string(content))
+	// 		if err != nil {
+	// 			return nil, err
+	// 		}
+	// 	case changefeedbase.OptFormatCSV:
+	// 		content = msg.val
+	// 	}
+	//
+	// 	sinkMessages = append(sinkMessages, pubsubMessagePayload{
+	// 		content: content,
+	// 		topic:   topicName,
+	// 	})
+	// }
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
-func (pe *pubsubEmitter) EncodeResolvedMessage(payload ResolvedMessagePayload) (SinkPayload, error) {
+func (pe *pubsubEmitter) EncodeResolvedMessage(payload resolvedMessagePayload) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0)
 	if err := pe.topicNamer.Each(func(topic string) error {
 		sinkMessages = append(sinkMessages, pubsubMessagePayload{
@@ -175,7 +174,7 @@ func makePubsubEmitter(
 	encodingOpts changefeedbase.EncodingOptions,
 	targets changefeedbase.Targets,
 	knobs *TestingKnobs,
-) (SinkEmitter, error) {
+) (SinkClient, error) {
 	if u.Scheme != GcpScheme {
 		return nil, errors.Errorf("unknown scheme: %s", u.Scheme)
 	}
@@ -267,15 +266,16 @@ func makePubsubSink(
 	mb metricsRecorderBuilder,
 	knobs *TestingKnobs,
 ) (Sink, error) {
-	thinSink, err := makePubsubEmitter(ctx, u, encodingOpts, targets, knobs)
-	if err != nil {
-		return nil, err
-	}
-
-	flushCfg, retryOpts, err := getWorkerConfigFromJson(jsonConfig)
-	if err != nil {
-		return nil, err
-	}
-	flushCfg.Messages = 100
-	return makeBatchingWorkerSink(ctx, thinSink, flushCfg, retryOpts, source, mb)
+	return nil, nil
+	// thinSink, err := makePubsubEmitter(ctx, u, encodingOpts, targets, knobs)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	//
+	// flushCfg, retryOpts, err := getWorkerConfigFromJson(jsonConfig)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// flushCfg.Messages = 100
+	// return makeBatchingWorkerSink(ctx, thinSink, flushCfg, retryOpts, source, mb)
 }

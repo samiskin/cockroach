@@ -48,7 +48,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -170,10 +169,11 @@ type sinklessFeed struct {
 var _ cdctest.TestFeed = (*sinklessFeed)(nil)
 
 func timeout() time.Duration {
-	if util.RaceEnabled {
-		return 5 * time.Minute
-	}
-	return 30 * time.Second
+	return 5 * time.Second
+	// if util.RaceEnabled {
+	// 	return 5 * time.Minute
+	// }
+	// return 30 * time.Second
 }
 
 // Partitions implements the TestFeed interface.
@@ -552,29 +552,29 @@ func (s *notifyFlushSink) EncodeAndEmitRow(
 
 var _ Sink = (*notifyFlushSink)(nil)
 
-type notifyFlushSinkWorker struct {
-	SinkWorker
+type notifyFlushSinkClient struct {
+	SinkClient
 	sync      *sinkSynchronizer
 	successCh chan int
 }
 
-func (s *notifyFlushSinkWorker) watchSuccesses(shutdown chan struct{}) {
+func (s *notifyFlushSinkClient) watchSuccesses(shutdown chan struct{}) {
 	for {
 		select {
-		case numFlushed := <-s.SinkWorker.Successes():
-			s.sync.addFlush()
-			s.successCh <- numFlushed
+		// case numFlushed := <-s.SinkClient.Successes():
+		// 	s.sync.addFlush()
+		// 	s.successCh <- numFlushed
 		case <-shutdown:
 			return
 		}
 	}
 }
 
-func (s *notifyFlushSinkWorker) Successes() chan int {
+func (s *notifyFlushSinkClient) Successes() chan int {
 	return s.successCh
 }
 
-var _ SinkWorker = (*notifyFlushSinkWorker)(nil)
+var _ SinkClient = (*notifyFlushSinkClient)(nil)
 
 // feedInjectable is the subset of the
 // TestServerInterface/TestTenantInterface needed for depInjector to
@@ -1934,9 +1934,9 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 	ss := &sinkSynchronizer{}
 
 	wrapSink := func(s Sink) Sink {
-		if sinkWorker, ok := s.(SinkWorker); ok {
-			return wrapSinkWorker(sinkWorker, &wg, done, ss)
-		}
+		// if sinkWorker, ok := s.(SinkClient); ok {
+		// 	return wrapSinkClient(sinkWorker, &wg, done, ss)
+		// }
 		return s
 	}
 
@@ -1956,9 +1956,9 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 	return c, nil
 }
 
-func wrapSinkWorker(sinkWorker SinkWorker, wg *sync.WaitGroup, doneCh chan struct{}, ss *sinkSynchronizer) SinkWorker {
-	notifyWorker := notifyFlushSinkWorker{
-		SinkWorker: sinkWorker,
+func wrapSinkClient(sinkWorker SinkClient, wg *sync.WaitGroup, doneCh chan struct{}, ss *sinkSynchronizer) SinkClient {
+	notifyWorker := notifyFlushSinkClient{
+		SinkClient: sinkWorker,
 		sync:       ss,
 		successCh:  make(chan int, 256),
 	}
@@ -2337,9 +2337,9 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	done := make(chan struct{})
 	ss := &sinkSynchronizer{}
 	wrapSink := func(s Sink) Sink {
-		if sinkWorker, ok := s.(SinkWorker); ok {
-			return wrapSinkWorker(sinkWorker, &wg, done, ss)
-		}
+		// if sinkWorker, ok := s.(SinkClient); ok {
+		// 	return wrapSinkClient(sinkWorker, &wg, done, ss)
+		// }
 		return s
 	}
 

@@ -53,17 +53,18 @@ func makeWebhookSink(
 	opts changefeedbase.WebhookSinkOptions,
 	source timeutil.TimeSource,
 	mb metricsRecorderBuilder,
-) (SinkWorker, error) {
-	thinSink, err := makeWebhookEmitter(ctx, u, encodingOpts, opts)
-	if err != nil {
-		return nil, err
-	}
-
-	flushCfg, retryOpts, err := getWorkerConfigFromJson(opts.JSONConfig)
-	if err != nil {
-		return nil, err
-	}
-	return makeBatchingWorkerSink(ctx, thinSink, flushCfg, retryOpts, source, mb)
+) (Sink, error) {
+	return nil, nil
+	// thinSink, err := makeWebhookEmitter(ctx, u, encodingOpts, opts)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	//
+	// flushCfg, retryOpts, err := getSinkConfigFromJson(opts.JSONConfig)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// return makeSinkBatcher(ctx, thinSink, flushCfg, retryOpts, source, mb)
 }
 
 type webhookEmitter struct {
@@ -74,14 +75,14 @@ type webhookEmitter struct {
 	client     *httputil.Client
 }
 
-var _ SinkEmitter = (*webhookEmitter)(nil)
+var _ SinkClient = (*webhookEmitter)(nil)
 
 func makeWebhookEmitter(
 	ctx context.Context,
 	u sinkURL,
 	encodingOpts changefeedbase.EncodingOptions,
 	opts changefeedbase.WebhookSinkOptions,
-) (SinkEmitter, error) {
+) (SinkClient, error) {
 	err := validateWebhookOpts(u, encodingOpts, opts)
 	if err != nil {
 		return nil, err
@@ -211,7 +212,7 @@ func (we *webhookEmitter) makePayloadForBytes(body []byte) (SinkPayload, error) 
 	return req, nil
 }
 
-func (we *webhookEmitter) EncodeBatch(batch []MessagePayload) (SinkPayload, error) {
+func (we *webhookEmitter) EncodeBatch(batch []messagePayload) (SinkPayload, error) {
 	var reqBody []byte
 	var err error
 
@@ -234,7 +235,7 @@ type webhookJsonEvent struct {
 	Length  int               `json:"length"`
 }
 
-func encodeWebhookMsgJSON(messages []MessagePayload) ([]byte, error) {
+func encodeWebhookMsgJSON(messages []messagePayload) ([]byte, error) {
 	payload := make([]json.RawMessage, len(messages))
 	for i, m := range messages {
 		payload[i] = m.val
@@ -251,7 +252,7 @@ func encodeWebhookMsgJSON(messages []MessagePayload) ([]byte, error) {
 	return j, err
 }
 
-func encodeWebhookMsgCSV(messages []MessagePayload) ([]byte, error) {
+func encodeWebhookMsgCSV(messages []messagePayload) ([]byte, error) {
 	var mergedMsgs []byte
 	for _, m := range messages {
 		mergedMsgs = append(mergedMsgs, m.val...)
@@ -260,7 +261,7 @@ func encodeWebhookMsgCSV(messages []MessagePayload) ([]byte, error) {
 }
 
 func (we *webhookEmitter) EncodeResolvedMessage(
-	payload ResolvedMessagePayload,
+	payload resolvedMessagePayload,
 ) (SinkPayload, error) {
 	return we.makePayloadForBytes(payload.body)
 }

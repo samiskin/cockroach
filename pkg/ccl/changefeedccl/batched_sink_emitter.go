@@ -9,6 +9,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
@@ -25,6 +26,10 @@ type batchedSinkEmitter struct {
 	rowCh        chan rowPayload
 	forceFlushCh chan struct{}
 
+	mu struct {
+		syncutil.RWMutex
+		err error
+	}
 	doneCh     chan struct{}
 	wg         ctxgroup.Group
 	timeSource timeutil.TimeSource
@@ -40,7 +45,7 @@ func makeBatchedSinkEmitter(
 	errorCh chan error,
 	timeSource timeutil.TimeSource,
 	metrics metricsRecorder,
-) (batchedSinkEmitter, error) {
+) batchedSinkEmitter {
 	bs := batchedSinkEmitter{
 		ctx:       ctx,
 		sc:        sink,
@@ -64,7 +69,7 @@ func makeBatchedSinkEmitter(
 		return bs.startBatchWorker()
 	})
 
-	return bs, nil
+	return bs
 }
 
 type rowPayload struct {
@@ -100,14 +105,21 @@ func (bs *batchedSinkEmitter) Close() error {
 	return bs.wg.Wait()
 }
 
-// TODO: Move this somewhere else?
 func (bs *batchedSinkEmitter) handleError(err error) {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	if bs.mu.err == nil {
+		bs.mu.err = changefeedbase.MarkRetryableError(err)
+	} else {
+		return
+	}
+
 	select {
 	case <-bs.ctx.Done():
 		return
 	case <-bs.doneCh:
 		return
-	case bs.errorCh <- changefeedbase.MarkRetryableError(err):
+	case bs.errorCh <- bs.mu.err:
 		return
 	}
 }
@@ -204,11 +216,19 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) e
 		case <-bs.doneCh:
 			return nil
 		case batch := <-batchCh:
+			// Never emit messages if an error has occured as ordering guarantees may be compromised
+			bs.mu.RLock()
+			if bs.mu.err != nil {
+				bs.mu.RUnlock()
+				batch.alloc.Release(bs.ctx)
+				continue
+			}
+			bs.mu.RUnlock()
+
 			flushCallback := bs.metrics.recordFlushRequestCallback()
 			err := emitWithRetries(bs.ctx, batch.sinkPayload, batch.numMessages, bs.sc, bs.retryOpts, bs.metrics)
 			if err != nil {
 				bs.handleError(err)
-				return nil
 			}
 
 			bs.metrics.recordEmittedBatch(
@@ -281,43 +301,3 @@ func (mb *messageBatch) Append(p rowPayload, keyInValue bool) {
 
 	mb.alloc.Merge(&p.alloc)
 }
-
-// TODO: These goes into the parallel sink
-// func (bs *batchedSinkEmitter) EmitRow(
-// 	ctx context.Context,
-// 	topic TopicDescriptor,
-// 	key, value []byte,
-// 	updated, mvcc hlc.Timestamp,
-// 	alloc kvevent.Alloc,
-// ) error {
-// 	bs.rowCh <- rowPayload{
-// 		msg: messagePayload{
-// 			key:   key,
-// 			val:   value,
-// 			topic: topic,
-// 		},
-// 		mvcc:  mvcc,
-// 		alloc: alloc,
-// 	}
-// 	return nil
-// }
-//
-// func (bs *batchedSinkEmitter) EmitResolvedTimestamp(
-// 	ctx context.Context, encoder Encoder, resolved hlc.Timestamp,
-// ) error {
-// 	defer bs.metrics.recordResolvedCallback()()
-//
-// 	data, err := encoder.EncodeResolvedTimestamp(ctx, "", resolved)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	payload, err := bs.se.EncodeResolvedMessage(resolvedMessagePayload{
-// 		resolvedTs: resolved,
-// 		body:       data,
-// 	})
-// 	if err != nil {
-// 		return err
-// 	}
-// 	return bs.sendWithRetries(payload, 1)
-// }
-//

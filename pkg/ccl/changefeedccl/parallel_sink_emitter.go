@@ -62,11 +62,11 @@ func (pse *parallelSinkEmitter) Flush(ctx context.Context) error {
 }
 
 func (pse *parallelSinkEmitter) Close() error {
-	return nil
+	close(pse.doneCh)
+	return pse.wg.Wait()
 }
 
 func (pse *parallelSinkEmitter) Dial() error {
-	// Maybe dial every topic?
 	return nil
 }
 
@@ -77,13 +77,22 @@ type parallelTopicEmitter struct {
 	hasher     hash.Hash32
 	wg         ctxgroup.Group
 	doneCh     chan struct{}
-	metrics    metricsRecorder
 }
 
-func (pte *parallelTopicEmitter) startTopicWorkers(
+func makeTopicEmitter(
+	ctx context.Context,
+	numWorkers int64,
 	emitterFactory func() batchedSinkEmitter,
-) {
-	pte.workerCh = make([]chan rowPayload, pte.numWorkers)
+) *parallelTopicEmitter {
+	pte := &parallelTopicEmitter{
+		ctx:        ctx,
+		numWorkers: numWorkers,
+		workerCh:   make([]chan rowPayload, numWorkers),
+		hasher:     makeHasher(),
+		wg:         ctxgroup.WithContext(ctx),
+		doneCh:     make(chan struct{}),
+	}
+
 	for worker := int64(0); worker < pte.numWorkers; worker++ {
 		workerCh := make(chan rowPayload, 256)
 		emitter := emitterFactory()
@@ -92,6 +101,8 @@ func (pte *parallelTopicEmitter) startTopicWorkers(
 		})
 		pte.workerCh[worker] = workerCh
 	}
+
+	return pte
 }
 
 func (pte *parallelTopicEmitter) workerLoop(input chan rowPayload, emitter batchedSinkEmitter) error {
@@ -154,3 +165,43 @@ func (pse *parallelSinkEmitter) EmitResolvedTimestamp(ctx context.Context, encod
 	}
 	return nil
 }
+
+// TODO: These goes into the parallel sink
+// func (bs *batchedSinkEmitter) EmitRow(
+// 	ctx context.Context,
+// 	topic TopicDescriptor,
+// 	key, value []byte,
+// 	updated, mvcc hlc.Timestamp,
+// 	alloc kvevent.Alloc,
+// ) error {
+// 	bs.rowCh <- rowPayload{
+// 		msg: messagePayload{
+// 			key:   key,
+// 			val:   value,
+// 			topic: topic,
+// 		},
+// 		mvcc:  mvcc,
+// 		alloc: alloc,
+// 	}
+// 	return nil
+// }
+//
+// func (bs *batchedSinkEmitter) EmitResolvedTimestamp(
+// 	ctx context.Context, encoder Encoder, resolved hlc.Timestamp,
+// ) error {
+// 	defer bs.metrics.recordResolvedCallback()()
+//
+// 	data, err := encoder.EncodeResolvedTimestamp(ctx, "", resolved)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	payload, err := bs.se.EncodeResolvedMessage(resolvedMessagePayload{
+// 		resolvedTs: resolved,
+// 		body:       data,
+// 	})
+// 	if err != nil {
+// 		return err
+// 	}
+// 	return bs.sendWithRetries(payload, 1)
+// }
+//
