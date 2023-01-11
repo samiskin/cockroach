@@ -34,6 +34,7 @@ type batchedSinkEmitter struct {
 	wg         ctxgroup.Group
 	timeSource timeutil.TimeSource
 	metrics    metricsRecorder
+	pacer      SinkPacer
 }
 
 func makeBatchedSinkEmitter(
@@ -45,7 +46,9 @@ func makeBatchedSinkEmitter(
 	errorCh chan error,
 	timeSource timeutil.TimeSource,
 	metrics metricsRecorder,
+	pacer SinkPacer,
 ) *batchedSinkEmitter {
+
 	bs := batchedSinkEmitter{
 		ctx:       ctx,
 		sc:        sink,
@@ -61,6 +64,7 @@ func makeBatchedSinkEmitter(
 		wg:           ctxgroup.WithContext(ctx),
 		timeSource:   timeSource,
 		metrics:      metrics,
+		pacer:        pacer,
 	}
 
 	// Since flushes need to be triggerable from both EmitRow and a timer firing,
@@ -183,6 +187,10 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 	flushTimer := bs.timeSource.NewTimer()
 
 	for {
+		if bs.pacer != nil {
+			bs.pacer.Pace(bs.ctx)
+		}
+
 		select {
 		case <-bs.ctx.Done():
 			return bs.ctx.Err()
@@ -226,6 +234,10 @@ func (bs *batchedSinkEmitter) isTerminated() bool {
 
 func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) error {
 	for {
+		if bs.pacer != nil {
+			bs.pacer.Pace(bs.ctx)
+		}
+
 		select {
 		case <-bs.ctx.Done():
 			return bs.ctx.Err()

@@ -920,7 +920,7 @@ func registerCDC(r registry.Registry) {
 
 			ct.runTPCCWorkload(tpccArgs{warehouses: 1000})
 
-			exportStatsFile := ct.startStatsCollection()
+			// exportStatsFile := ct.startStatsCollection()
 			feed := ct.newChangefeed(feedArgs{
 				sinkType: webhookSink,
 				targets:  []string{"tpcc.order_line"},
@@ -930,7 +930,7 @@ func registerCDC(r registry.Registry) {
 			// 	initialScanLatency: 30 * time.Minute,
 			// })
 			feed.waitForCompletion()
-			exportStatsFile()
+			// exportStatsFile()
 		},
 	})
 	r.Add(registry.TestSpec{

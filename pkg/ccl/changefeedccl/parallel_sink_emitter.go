@@ -35,6 +35,7 @@ type parallelSinkEmitter struct {
 	wg      ctxgroup.Group
 	doneCh  chan struct{}
 	metrics metricsRecorder
+	pacer   SinkPacer
 }
 
 var _ AsyncSink = (*parallelSinkEmitter)(nil)
@@ -77,14 +78,16 @@ func makeParallelSinkEmitter(
 	config sinkBatchConfig,
 	retryOpts retry.Options,
 	numWorkers int64,
+	topicNamer *TopicNamer,
 	metrics metricsRecorder,
+	pacer SinkPacer,
 ) AsyncSink {
 	pse := &parallelSinkEmitter{
-		ctx:       ctx,
-		client:    client,
-		batchCfg:  config,
-		retryOpts: retryOpts,
-		// TODO: TopicNamer
+		ctx:        ctx,
+		client:     client,
+		batchCfg:   config,
+		retryOpts:  retryOpts,
+		topicNamer: topicNamer,
 
 		successCh: make(chan int, 256),
 		errorCh:   make(chan error, 1),
@@ -126,6 +129,7 @@ func (pse *parallelSinkEmitter) EmitRow(
 		topic: topic,
 	}
 	workerId := pse.workerIndex(payload)
+	pse.metrics.recordParallelEmitterAdmit()
 	select {
 	case <-pse.ctx.Done():
 		return pse.ctx.Err()
@@ -146,8 +150,11 @@ func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
 		pse.errorCh,
 		timeutil.DefaultTimeSource{},
 		pse.metrics,
+		pse.pacer,
 	)
 	for {
+		pse.pacer.Pace(pse.ctx)
+
 		select {
 		case <-pse.ctx.Done():
 			return pse.ctx.Err()
@@ -155,6 +162,7 @@ func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
 			return nil
 		case row := <-input:
 			emitter.Emit(row)
+			pse.metrics.recordParallelEmitterEmit()
 		}
 	}
 }

@@ -21,10 +21,13 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/util/admission"
+	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/bufalloc"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -178,9 +181,10 @@ func getSink(
 			if err != nil {
 				return nil, err
 			}
+
 			return validateOptionsAndMakeSink(changefeedbase.WebhookValidOptions, func() (Sink, error) {
 				return makeWebhookSink(ctx, sinkURL{URL: u}, encodingOpts, webhookOpts,
-					timeutil.DefaultTimeSource{}, metricsBuilder)
+					timeutil.DefaultTimeSource{}, metricsBuilder, newSinkPacer())
 			})
 		case isPubsubSink(u):
 			// TODO: add metrics to pubsubsink
@@ -723,4 +727,49 @@ func (j *jsonMaxRetries) UnmarshalJSON(b []byte) error {
 		}
 	}
 	return nil
+}
+
+func newSinkPacer(ctx context.Context, cfg *execinfra.ServerConfig) SinkPacer {
+	pacerRequestUnit := changefeedbase.SinkPacerRequestSize.Get(&cfg.Settings.SV)
+	enablePacer := changefeedbase.SinkPacerElasticCPUControlEnabled.Get(&cfg.Settings.SV)
+	if !enablePacer {
+		return nil
+	}
+
+	tenantID, ok := roachpb.TenantFromContext(ctx)
+	if !ok {
+		tenantID = roachpb.SystemTenantID
+	}
+
+	pacer := cfg.AdmissionPacerFactory.NewPacer(
+		pacerRequestUnit,
+		admission.WorkInfo{
+			TenantID:        tenantID,
+			Priority:        admissionpb.BulkNormalPri,
+			CreateTime:      timeutil.Now().UnixNano(),
+			BypassAdmission: false,
+		},
+	)
+
+	return &sinkPacer{
+		pacer: pacer,
+	}
+}
+
+type sinkPacer struct {
+	pacer *admission.Pacer
+}
+
+func (sp *sinkPacer) Pace(ctx context.Context) {
+	if sp.pacer != nil {
+		if err := sp.pacer.Pace(ctx); err != nil {
+			if pacerLogEvery.ShouldLog() {
+				log.Errorf(ctx, "automatic sink pacing: %v", err)
+			}
+		}
+	}
+}
+
+type SinkPacer interface {
+	Pace(context.Context)
 }

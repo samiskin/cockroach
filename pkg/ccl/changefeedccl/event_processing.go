@@ -290,19 +290,21 @@ func (c *kvEventToRowConsumer) topicForEvent(eventMeta cdcevent.Metadata) (Topic
 }
 
 // ConsumeEvent manages kv event lifetime: parsing, encoding and event being emitted to the sink.
-func (c *kvEventToRowConsumer) ConsumeEvent(ctx context.Context, ev kvevent.Event) (emitted bool, err error) {
+func (c *kvEventToRowConsumer) ConsumeEvent(
+	ctx context.Context, ev kvevent.Event,
+) (emitted bool, err error) {
 	if ev.Type() != kvevent.TypeKV {
 		return false, errors.AssertionFailedf("expected kv ev, got %v", ev.Type())
 	}
 
-	// // Request CPU time to use for event consumption, block if this time is
-	// // unavailable. If there is unused CPU time left from the last call to
-	// // Pace, then use that time instead of blocking.
-	// if err := c.pacer.Pace(ctx); err != nil {
-	// 	if pacerLogEvery.ShouldLog() {
-	// 		log.Errorf(ctx, "automatic pacing: %v", err)
-	// 	}
-	// }
+	// Request CPU time to use for event consumption, block if this time is
+	// unavailable. If there is unused CPU time left from the last call to
+	// Pace, then use that time instead of blocking.
+	if err := c.pacer.Pace(ctx); err != nil {
+		if pacerLogEvery.ShouldLog() {
+			log.Errorf(ctx, "automatic pacing: %v", err)
+		}
+	}
 
 	schemaTimestamp := ev.KV().Value.Timestamp
 	prevSchemaTimestamp := schemaTimestamp
@@ -595,7 +597,9 @@ func (c *parallelEventConsumer) startWorkers(sink EventSink) error {
 	return nil
 }
 
-func (c *parallelEventConsumer) asyncSinkWorkerLoop(ctx context.Context, asyncSink AsyncSink) error {
+func (c *parallelEventConsumer) asyncSinkWorkerLoop(
+	ctx context.Context, asyncSink AsyncSink,
+) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -701,7 +705,7 @@ func (c *parallelEventConsumer) Flush(ctx context.Context) error {
 
 	// TODO: Make the sink flush itself
 	if _, ok := c.sink.(AsyncSink); ok {
-		_ := c.sink.Flush(ctx)
+		_ = c.sink.Flush(ctx)
 	}
 
 	select {

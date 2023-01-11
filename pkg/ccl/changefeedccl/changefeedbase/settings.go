@@ -270,3 +270,21 @@ var EventConsumerElasticCPUControlEnabled = settings.RegisterBoolSetting(
 	"determines whether changefeed event processing integrates with elastic CPU control",
 	true,
 )
+
+var SinkPacerRequestSize = settings.RegisterDurationSetting(
+	settings.TenantWritable,
+	"changefeed.cpu.per_sink_worker_allocation",
+	"a sync worker routine will perform a blocking request for CPU time before"+
+		"consuming events. After fully utilizing this CPU time, it will request more",
+	50*time.Millisecond,
+	settings.PositiveDuration,
+)
+
+// EventConsumerElasticCPUControlEnabled determines whether changefeed event
+// processing integrates with elastic CPU control.
+var SinkPacerElasticCPUControlEnabled = settings.RegisterBoolSetting(
+	settings.TenantWritable,
+	"changefeed.cpu.per_sink_worker_elastic_control.enabled",
+	"determines whether changefeed sink emitting integrates with elastic CPU control",
+	true,
+)
