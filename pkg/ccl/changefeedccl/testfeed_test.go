@@ -63,6 +63,7 @@ import (
 	"google.golang.org/api/option"
 	pb "google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type sinklessFeedFactory struct {
@@ -1932,6 +1933,14 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 	return c, nil
 }
 
+type wrappedPubsubSink struct {
+	AsyncSink
+}
+
+func (w *wrappedPubsubSink) Close() error {
+	return nil
+}
+
 type notifyFlushAsyncSink struct {
 	AsyncSink
 	successCh chan int
@@ -1954,6 +1963,7 @@ func wrapAsyncSink(
 		for {
 			select {
 			case flushed := <-sink.Successes():
+				fmt.Printf("\n\x1b[31m FLUSHED %d \x1b[0m\n", flushed)
 				ss.addFlush()
 				notifySink.successCh <- flushed
 			case <-doneCh:
@@ -2174,11 +2184,14 @@ func (ps *fakePubsubServer) React(req interface{}) (handled bool, ret interface{
 		ps.mu.Lock()
 		defer ps.mu.Unlock()
 		for _, msg := range publishReq.Messages {
+			fmt.Printf("\n\x1b[33m REACT (%+v)\x1b[0m\n", msg)
 			ps.mu.buffer = append(ps.mu.buffer, mockPubsubMessage{data: string(msg.Data)})
 		}
 		if ps.mu.notify != nil {
-			close(ps.mu.notify)
+			notifyCh := ps.mu.notify
 			ps.mu.notify = nil
+			fmt.Printf("\n\x1b[33m NOTIFYING \x1b[0m\n")
+			close(notifyCh)
 		}
 	}
 
@@ -2198,7 +2211,8 @@ func (s *fakePubsubServer) NotifyMessage() chan struct{} {
 }
 
 func (ps *fakePubsubServer) Dial() (*grpc.ClientConn, error) {
-	conn, err := grpc.Dial(ps.srv.Addr, grpc.WithInsecure())
+	fmt.Printf("\n\x1b[31m DIAL %s \x1b[0m\n", ps.srv.Addr)
+	conn, err := grpc.Dial(ps.srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
@@ -2209,6 +2223,7 @@ func (ps *fakePubsubServer) Dial() (*grpc.ClientConn, error) {
 func (ps *fakePubsubServer) Pop() *mockPubsubMessage {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	fmt.Printf("\n\x1b[33m POP (%+v)\x1b[0m\n", len(ps.mu.buffer))
 	if len(ps.mu.buffer) == 0 {
 		return nil
 	}
@@ -2218,14 +2233,15 @@ func (ps *fakePubsubServer) Pop() *mockPubsubMessage {
 }
 
 func (ps *fakePubsubServer) Close() error {
+	for _, conn := range ps.conns {
+		err := conn.Close() // nolint:grpcconnclose
+		if err != nil {
+			return err
+		}
+	}
 	ps.srv.Wait()
 	if err := ps.srv.Close(); err != nil {
 		return err
-	}
-	for _, conn := range ps.conns {
-		if err := conn.Close(); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -2315,38 +2331,53 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 
 	mockServer := makeFakePubsubServer()
 	p.Server().DistSQLServer().(*distsql.ServerImpl).TestingKnobs.Changefeed.(*TestingKnobs).PubsubClientOverride = func(ctx context.Context) (*pubsub.Client, error) {
-		conn, err := mockServer.Dial()
-		if err != nil {
-			return nil, err
-		}
-		return pubsub.NewClient(
+		client, err := pubsub.NewClient(
 			ctx,
 			"testfeed",
-			option.WithGRPCConn(conn),
 		)
+		if err == nil {
+			_ = client.Close()
+		}
+		return client, err
+	}
+	conn, err := mockServer.Dial()
+	if err != nil {
+		return nil, err
 	}
 
 	var wg sync.WaitGroup
+	var psEmitter *pubsubEmitter
 	done := make(chan struct{})
 	ss := &sinkSynchronizer{}
-	// wrapSink := func(s Sink) Sink {
-	// 	if asyncSink, ok := s.(AsyncSink); ok {
-	// 		return wrapAsyncSink(asyncSink, &wg, done, ss)
-	// 	}
-	// 	return s
-	// }
+	wrapSink := func(s Sink) Sink {
+		if parallelEmitter, ok := s.(*parallelSinkEmitter); ok {
+			if emitter, ok := parallelEmitter.client.(*pubsubEmitter); ok {
+				client, err := pubsub.NewClient(
+					context.Background(), "testfeed", option.WithGRPCConn(conn),
+				)
+				if err == nil {
+					emitter.client = client
+				}
+				psEmitter = emitter
+			}
+			// return wrapAsyncSink(parallelEmitter, &wg, done, ss)
+			return &wrappedPubsubSink{wrapAsyncSink(parallelEmitter, &wg, done, ss)}
+		}
+		return s
+	}
+
 	client := &fakePubsubClient{
 		buffer: &mockPubsubMessageBuffer{
 			rows: make([]mockPubsubMessage, 0),
 		},
 	}
-	wrapSink := func(s Sink) Sink {
-		return &fakePubsubSink{
-			Sink:   s,
-			client: client,
-			sync:   ss,
-		}
-	}
+	// wrapSink := func(s Sink) Sink {
+	// 	return &fakePubsubSink{
+	// 		Sink:   s,
+	// 		client: client,
+	// 		sync:   ss,
+	// 	}
+	// }
 
 	c := &pubsubFeed{
 		jobFeed:        newJobFeed(p.jobsTableConn(), wrapSink),
@@ -2356,6 +2387,7 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 		doneCh:         done,
 		wg:             &wg,
 		mockServer:     mockServer,
+		emitter:        psEmitter,
 	}
 
 	if err := p.startFeedJob(c.jobFeed, createStmt.String(), args...); err != nil {
@@ -2375,6 +2407,7 @@ type pubsubFeed struct {
 	ss         *sinkSynchronizer
 	client     *fakePubsubClient
 	mockServer *fakePubsubServer
+	emitter    *pubsubEmitter
 	wg         *sync.WaitGroup
 	doneCh     chan struct{}
 }
@@ -2411,8 +2444,9 @@ func extractJSONMessagePubsub(wrapped []byte) (value []byte, key []byte, topic s
 // Next implements TestFeed
 func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 	for {
-		// msg := p.mockServer.Pop()
-		msg := p.client.buffer.pop()
+		msg := p.mockServer.Pop()
+		fmt.Printf("\n\x1b[31m POPPED (%+v) \x1b[0m\n", msg)
+		// msg := p.client.buffer.pop()
 		if msg != nil {
 			details, err := p.Details()
 			if err != nil {
@@ -2454,9 +2488,11 @@ func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-p.ss.eventReady():
+					fmt.Printf("\n\x1b[31m EVENT READY (%+v) \x1b[0m\n", msg)
 					return nil
-				// case <-p.mockServer.NotifyMessage():
-				// 	return nil
+				case <-p.mockServer.NotifyMessage():
+					fmt.Printf("\n\x1b[31m NOTIFY MESSAGE (%+v) \x1b[0m\n", msg)
+					return nil
 				case <-p.shutdown:
 					return p.terminalJobError()
 				}
@@ -2475,7 +2511,10 @@ func (p *pubsubFeed) Close() error {
 	}
 	close(p.doneCh)
 	p.wg.Wait()
-	p.mockServer.Close()
+	if p.emitter != nil {
+		_ = p.emitter.Close()
+	}
+	_ = p.mockServer.Close()
 	return nil
 }
 

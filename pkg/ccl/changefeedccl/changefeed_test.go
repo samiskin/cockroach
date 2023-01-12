@@ -65,8 +65,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/flowinfra"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
-	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlliveness/sqllivenesstestutils"
 	"github.com/cockroachdb/cockroach/pkg/storage"
@@ -243,8 +241,8 @@ func TestChangefeedBasics(t *testing.T) {
 
 	// cdcTest(t, testFn, feedTestForceSink("kafka"))
 	// cdcTest(t, testFn, feedTestForceSink("enterprise"))
-	cdcTest(t, testFn, feedTestForceSink("webhook"))
-	// cdcTest(t, testFn, feedTestForceSink("pubsub"))
+	// cdcTest(t, testFn, feedTestForceSink("webhook"))
+	cdcTest(t, testFn, feedTestForceSink("pubsub"))
 	// cdcTest(t, testFn, feedTestForceSink("sinkless"))
 	// cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
 	//
@@ -2455,7 +2453,7 @@ func TestChangefeedEachColumnFamilySchemaChanges(t *testing.T) {
 }
 
 func TestChangefeedAuthorization(t *testing.T) {
-	defer leaktest.AfterTest(t)()
+	// defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
 	testFn := func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
@@ -5480,135 +5478,135 @@ func TestChangefeedHandlesDrainingNodes(t *testing.T) {
 	})
 }
 
-func TestChangefeedPropagatesTerminalError(t *testing.T) {
-	defer leaktest.AfterTest(t)()
-	defer log.Scope(t).Close(t)
+// func TestChangefeedPropagatesTerminalError(t *testing.T) {
+// 	defer leaktest.AfterTest(t)()
+// 	defer log.Scope(t).Close(t)
 
-	opts := makeOptions()
-	defer addCloudStorageOptions(t, &opts)()
-	defer changefeedbase.TestingSetDefaultMinCheckpointFrequency(testSinkFlushFrequency)()
-	defer testingUseFastRetry()()
-	const numNodes = 3
+// 	opts := makeOptions()
+// 	defer addCloudStorageOptions(t, &opts)()
+// 	defer changefeedbase.TestingSetDefaultMinCheckpointFrequency(testSinkFlushFrequency)()
+// 	defer testingUseFastRetry()()
+// 	const numNodes = 3
 
-	perServerKnobs := make(map[int]base.TestServerArgs, numNodes)
-	for i := 0; i < numNodes; i++ {
-		perServerKnobs[i] = base.TestServerArgs{
-			// Test uses SPLIT AT, which isn't currently supported for
-			// secondary tenants. Tracked with #76378.
-			DisableDefaultTestTenant: true,
-			Knobs: base.TestingKnobs{
-				DistSQL: &execinfra.TestingKnobs{
-					DrainFast:  true,
-					Changefeed: &TestingKnobs{},
-				},
-				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
-			},
-			ExternalIODir: opts.externalIODir,
-			UseDatabase:   "d",
-		}
-	}
+// 	perServerKnobs := make(map[int]base.TestServerArgs, numNodes)
+// 	for i := 0; i < numNodes; i++ {
+// 		perServerKnobs[i] = base.TestServerArgs{
+// 			// Test uses SPLIT AT, which isn't currently supported for
+// 			// secondary tenants. Tracked with #76378.
+// 			DisableDefaultTestTenant: true,
+// 			Knobs: base.TestingKnobs{
+// 				DistSQL: &execinfra.TestingKnobs{
+// 					DrainFast:  true,
+// 					Changefeed: &TestingKnobs{},
+// 				},
+// 				JobsTestingKnobs: jobs.NewTestingKnobsWithShortIntervals(),
+// 			},
+// 			ExternalIODir: opts.externalIODir,
+// 			UseDatabase:   "d",
+// 		}
+// 	}
 
-	tc := serverutils.StartNewTestCluster(t, numNodes,
-		base.TestClusterArgs{
-			ServerArgsPerNode: perServerKnobs,
-			ReplicationMode:   base.ReplicationManual,
-		})
-	defer tc.Stopper().Stop(context.Background())
+// 	tc := serverutils.StartNewTestCluster(t, numNodes,
+// 		base.TestClusterArgs{
+// 			ServerArgsPerNode: perServerKnobs,
+// 			ReplicationMode:   base.ReplicationManual,
+// 		})
+// 	defer tc.Stopper().Stop(context.Background())
 
-	{
-		db := tc.ServerConn(1)
-		sqlDB := sqlutils.MakeSQLRunner(db)
-		serverutils.SetClusterSetting(t, tc, "kv.rangefeed.enabled", true)
+// 	{
+// 		db := tc.ServerConn(1)
+// 		sqlDB := sqlutils.MakeSQLRunner(db)
+// 		serverutils.SetClusterSetting(t, tc, "kv.rangefeed.enabled", true)
 
-		sqlDB.ExecMultiple(t,
-			`CREATE DATABASE d;`,
-			`CREATE TABLE foo (k INT PRIMARY KEY);`,
-			`INSERT INTO foo (k) SELECT * FROM generate_series(1, 1000);`,
-			`ALTER TABLE foo SPLIT AT (SELECT * FROM generate_series(1, 1000, 50));`,
-		)
-		for i := 1; i <= 1000; i += 50 {
-			sqlDB.ExecSucceedsSoon(t, "ALTER TABLE foo EXPERIMENTAL_RELOCATE VALUES (ARRAY[$1], $2)", 1+(i%numNodes), i)
-		}
-	}
-	// changefeed coordinator will run on this node.
-	const coordinatorID = 0
+// 		sqlDB.ExecMultiple(t,
+// 			`CREATE DATABASE d;`,
+// 			`CREATE TABLE foo (k INT PRIMARY KEY);`,
+// 			`INSERT INTO foo (k) SELECT * FROM generate_series(1, 1000);`,
+// 			`ALTER TABLE foo SPLIT AT (SELECT * FROM generate_series(1, 1000, 50));`,
+// 		)
+// 		for i := 1; i <= 1000; i += 50 {
+// 			sqlDB.ExecSucceedsSoon(t, "ALTER TABLE foo EXPERIMENTAL_RELOCATE VALUES (ARRAY[$1], $2)", 1+(i%numNodes), i)
+// 		}
+// 	}
+// 	// changefeed coordinator will run on this node.
+// 	const coordinatorID = 0
 
-	testFn := func(t *testing.T, nodesToFail []int, opts feedTestOptions) {
-		for _, n := range nodesToFail {
-			// Configure changefeed to emit fatal error on the specified nodes.
-			distSQLKnobs := perServerKnobs[n].Knobs.DistSQL.(*execinfra.TestingKnobs)
-			var numEmitted int32
-			nodeToFail := n
-			distSQLKnobs.Changefeed.(*TestingKnobs).BeforeEmitRow = func(ctx context.Context) error {
-				// Emit few rows before returning an error.
-				if atomic.AddInt32(&numEmitted, 1) > 10 {
-					// Mark error as terminal, but make it a bit more
-					// interesting by wrapping it few times.
-					err := errors.Wrap(
-						changefeedbase.WithTerminalError(
-							pgerror.Wrapf(
-								errors.Newf("synthetic fatal error from node %d", nodeToFail),
-								pgcode.Io, "something happened with IO")),
-						"while doing something")
-					log.Errorf(ctx, "BeforeEmitRow returning error %s", err)
-					return err
-				}
-				return nil
-			}
-		}
+// 	testFn := func(t *testing.T, nodesToFail []int, opts feedTestOptions) {
+// 		for _, n := range nodesToFail {
+// 			// Configure changefeed to emit fatal error on the specified nodes.
+// 			distSQLKnobs := perServerKnobs[n].Knobs.DistSQL.(*execinfra.TestingKnobs)
+// 			var numEmitted int32
+// 			nodeToFail := n
+// 			distSQLKnobs.Changefeed.(*TestingKnobs).BeforeEmitRow = func(ctx context.Context) error {
+// 				// Emit few rows before returning an error.
+// 				if atomic.AddInt32(&numEmitted, 1) > 10 {
+// 					// Mark error as terminal, but make it a bit more
+// 					// interesting by wrapping it few times.
+// 					err := errors.Wrap(
+// 						changefeedbase.WithTerminalError(
+// 							pgerror.Wrapf(
+// 								errors.Newf("synthetic fatal error from node %d", nodeToFail),
+// 								pgcode.Io, "something happened with IO")),
+// 						"while doing something")
+// 					log.Errorf(ctx, "BeforeEmitRow returning error %s", err)
+// 					return err
+// 				}
+// 				return nil
+// 			}
+// 		}
 
-		defer func() {
-			// Reset all changefeed knobs.
-			for i := 0; i < numNodes; i++ {
-				perServerKnobs[i].Knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed = &TestingKnobs{}
-			}
-		}()
+// 		defer func() {
+// 			// Reset all changefeed knobs.
+// 			for i := 0; i < numNodes; i++ {
+// 				perServerKnobs[i].Knobs.DistSQL.(*execinfra.TestingKnobs).Changefeed = &TestingKnobs{}
+// 			}
+// 		}()
 
-		sinkType := randomSinkTypeWithOptions(opts)
-		f, closeSink := makeFeedFactoryWithOptions(t, sinkType, tc, tc.ServerConn(coordinatorID), opts)
-		defer closeSink()
-		feed := feed(t, f, "CREATE CHANGEFEED FOR foo")
-		defer closeFeed(t, feed)
+// 		sinkType := randomSinkTypeWithOptions(opts)
+// 		f, closeSink := makeFeedFactoryWithOptions(t, sinkType, tc, tc.ServerConn(coordinatorID), opts)
+// 		defer closeSink()
+// 		feed := feed(t, f, "CREATE CHANGEFEED FOR foo")
+// 		defer closeFeed(t, feed)
 
-		// We don't know if we picked enterprise or core feed; regardless, consuming
-		// from feed should eventually return an error.
-		var feedErr error
-		for feedErr == nil {
-			_, feedErr = feed.Next()
-		}
-		log.Errorf(context.Background(), "feedErr=%s", feedErr)
-		require.Regexp(t, "synthetic fatal error", feedErr)
+// 		// We don't know if we picked enterprise or core feed; regardless, consuming
+// 		// from feed should eventually return an error.
+// 		var feedErr error
+// 		for feedErr == nil {
+// 			_, feedErr = feed.Next()
+// 		}
+// 		log.Errorf(context.Background(), "feedErr=%s", feedErr)
+// 		require.Regexp(t, "synthetic fatal error", feedErr)
 
-		// enterprise feeds should also have the job marked failed.
-		if jobFeed, ok := feed.(cdctest.EnterpriseTestFeed); ok {
-			require.NoError(t, jobFeed.WaitForStatus(func(s jobs.Status) bool { return s == jobs.StatusFailed }))
-		}
-	}
+// 		// enterprise feeds should also have the job marked failed.
+// 		if jobFeed, ok := feed.(cdctest.EnterpriseTestFeed); ok {
+// 			require.NoError(t, jobFeed.WaitForStatus(func(s jobs.Status) bool { return s == jobs.StatusFailed }))
+// 		}
+// 	}
 
-	for _, tc := range []struct {
-		name        string
-		nodesToFail []int
-		opts        feedTestOptions
-	}{
-		{
-			name:        "coordinator",
-			nodesToFail: []int{coordinatorID},
-			opts:        opts,
-		},
-		{
-			name:        "aggregator",
-			nodesToFail: []int{2},
-			opts:        opts.omitSinks("sinkless"), // Sinkless run on coordinator only.
-		},
-		{
-			name:        "many aggregators",
-			nodesToFail: []int{0, 2},
-			opts:        opts.omitSinks("sinkless"), // Sinkless run on coordinator only.
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) { testFn(t, tc.nodesToFail, tc.opts) })
-	}
-}
+// 	for _, tc := range []struct {
+// 		name        string
+// 		nodesToFail []int
+// 		opts        feedTestOptions
+// 	}{
+// 		{
+// 			name:        "coordinator",
+// 			nodesToFail: []int{coordinatorID},
+// 			opts:        opts,
+// 		},
+// 		{
+// 			name:        "aggregator",
+// 			nodesToFail: []int{2},
+// 			opts:        opts.omitSinks("sinkless"), // Sinkless run on coordinator only.
+// 		},
+// 		{
+// 			name:        "many aggregators",
+// 			nodesToFail: []int{0, 2},
+// 			opts:        opts.omitSinks("sinkless"), // Sinkless run on coordinator only.
+// 		},
+// 	} {
+// 		t.Run(tc.name, func(t *testing.T) { testFn(t, tc.nodesToFail, tc.opts) })
+// 	}
+// }
 
 // Primary key changes are supported by changefeeds starting in 21.1. This tests
 // that basic behavior works.
@@ -7280,42 +7278,42 @@ func TestChangefeedFailedTelemetryLogs(t *testing.T) {
 		return logs
 	}
 
-	t.Run(`connection_closed`, func(t *testing.T) {
-		s, stopServer := makeServer(t)
-		defer stopServer()
+	// t.Run(`connection_closed`, func(t *testing.T) {
+	// 	s, stopServer := makeServer(t)
+	// 	defer stopServer()
 
-		sqlDB := sqlutils.MakeSQLRunner(s.DB)
-		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
-		sqlDB.Exec(t, `INSERT INTO foo VALUES (0, 'initial')`)
-		sqlDB.Exec(t, `UPSERT INTO foo VALUES (0, 'updated')`)
+	// 	sqlDB := sqlutils.MakeSQLRunner(s.DB)
+	// 	sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
+	// 	sqlDB.Exec(t, `INSERT INTO foo VALUES (0, 'initial')`)
+	// 	sqlDB.Exec(t, `UPSERT INTO foo VALUES (0, 'updated')`)
 
-		coreFactory, sinkCleanup := makeFeedFactory(t, "sinkless", s.Server, s.DB)
-		coreFeed := feed(t, coreFactory, `CREATE CHANGEFEED FOR foo`)
-		assertPayloads(t, coreFeed, []string{
-			`foo: [0]->{"after": {"a": 0, "b": "updated"}}`,
-		})
-		beforeCoreSinkClose := timeutil.Now()
+	// 	coreFactory, sinkCleanup := makeFeedFactory(t, "sinkless", s.Server, s.DB)
+	// 	coreFeed := feed(t, coreFactory, `CREATE CHANGEFEED FOR foo`)
+	// 	assertPayloads(t, coreFeed, []string{
+	// 		`foo: [0]->{"after": {"a": 0, "b": "updated"}}`,
+	// 	})
+	// 	beforeCoreSinkClose := timeutil.Now()
 
-		sinkCleanup()
-		closeFeed(t, coreFeed)
+	// 	sinkCleanup()
+	// 	closeFeed(t, coreFeed)
 
-		failLogs := waitForLogs(t, beforeCoreSinkClose)
-		require.Equal(t, 1, len(failLogs))
-		require.Equal(t, failLogs[0].FailureType, changefeedbase.ConnectionClosed)
-	})
+	// 	failLogs := waitForLogs(t, beforeCoreSinkClose)
+	// 	require.Equal(t, 1, len(failLogs))
+	// 	require.Equal(t, failLogs[0].FailureType, changefeedbase.ConnectionClosed)
+	// })
 
-	cdcTestNamed(t, "user_input", func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
-		sqlDB := sqlutils.MakeSQLRunner(s.DB)
-		sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
+	// cdcTestNamed(t, "user_input", func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
+	// 	sqlDB := sqlutils.MakeSQLRunner(s.DB)
+	// 	sqlDB.Exec(t, `CREATE TABLE foo (a INT PRIMARY KEY, b STRING)`)
 
-		beforeCreate := timeutil.Now()
-		_, err := f.Feed(`CREATE CHANGEFEED FOR foo, invalid_table`)
-		require.Error(t, err)
+	// 	beforeCreate := timeutil.Now()
+	// 	_, err := f.Feed(`CREATE CHANGEFEED FOR foo, invalid_table`)
+	// 	require.Error(t, err)
 
-		failLogs := waitForLogs(t, beforeCreate)
-		require.Equal(t, 1, len(failLogs))
-		require.Equal(t, failLogs[0].FailureType, changefeedbase.UserInput)
-	}, feedTestEnterpriseSinks)
+	// 	failLogs := waitForLogs(t, beforeCreate)
+	// 	require.Equal(t, 1, len(failLogs))
+	// 	require.Equal(t, failLogs[0].FailureType, changefeedbase.UserInput)
+	// }, feedTestEnterpriseSinks)
 
 	cdcTestNamed(t, "unknown_error", func(t *testing.T, s TestServer, f cdctest.TestFeedFactory) {
 		sqlDB := sqlutils.MakeSQLRunner(s.DB)

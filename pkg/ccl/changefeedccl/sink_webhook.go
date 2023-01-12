@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
-	"github.com/cockroachdb/cockroach/pkg/util/admission"
 	"github.com/cockroachdb/cockroach/pkg/util/httputil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
@@ -54,7 +53,7 @@ func makeWebhookSink(
 	opts changefeedbase.WebhookSinkOptions,
 	source timeutil.TimeSource,
 	mb metricsRecorderBuilder,
-	pacer *admission.Pacer,
+	pacer SinkPacer,
 ) (Sink, error) {
 	sinkClient, err := makeWebhookSinkClient(ctx, u, encodingOpts, opts)
 	if err != nil {

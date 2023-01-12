@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/blobs"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/cdctest"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
+
 	// Imported to allow locality-related table mutations
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/multiregionccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/multiregionccl/multiregionccltestutils"
@@ -764,8 +765,8 @@ func randomSinkTypeWithOptions(options feedTestOptions) string {
 	sinkWeights := map[string]int{
 		"kafka":        0,
 		"enterprise":   0,
-		"webhook":      1,
-		"pubsub":       0,
+		"webhook":      0,
+		"pubsub":       1,
 		"sinkless":     0,
 		"cloudstorage": 0,
 	}

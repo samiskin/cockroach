@@ -65,7 +65,10 @@ func (pse *parallelSinkEmitter) Flush(ctx context.Context) error {
 
 func (pse *parallelSinkEmitter) Close() error {
 	close(pse.doneCh)
-	return pse.wg.Wait()
+	_ = pse.wg.Wait()
+	pse.pacer.Close()
+	_ = pse.client.Close()
+	return nil
 }
 
 func (pse *parallelSinkEmitter) Dial() error {
@@ -99,6 +102,7 @@ func makeParallelSinkEmitter(
 		wg:      ctxgroup.WithContext(ctx),
 		doneCh:  make(chan struct{}),
 		metrics: metrics,
+		pacer:   pacer,
 	}
 
 	for worker := int64(0); worker < pse.numWorkers; worker++ {
@@ -119,10 +123,20 @@ func (pse *parallelSinkEmitter) EmitRow(
 	updated, mvcc hlc.Timestamp,
 	alloc kvevent.Alloc,
 ) error {
+	var topicName string
+	var err error
+	if pse.topicNamer != nil {
+		topicName, err = pse.topicNamer.Name(topic)
+		if err != nil {
+			return err
+		}
+	}
+
 	payload := rowPayload{
 		msg: messagePayload{
-			key: key,
-			val: value,
+			key:   key,
+			val:   value,
+			topic: topicName,
 		},
 		mvcc:  mvcc,
 		alloc: alloc,
@@ -152,6 +166,10 @@ func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
 		pse.metrics,
 		pse.pacer,
 	)
+	defer func() {
+		_ = emitter.Close()
+	}()
+
 	for {
 		pse.pacer.Pace(pse.ctx)
 

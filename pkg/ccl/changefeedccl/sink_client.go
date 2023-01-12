@@ -24,8 +24,9 @@ type SinkPayload interface{}
 
 // messagePayload represents a KV event to be emitted.
 type messagePayload struct {
-	key []byte
-	val []byte
+	key   []byte
+	val   []byte
+	topic string
 }
 
 // resolvedMessagePayload represents a Resolved event to be emitted.

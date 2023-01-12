@@ -184,17 +184,17 @@ func getSink(
 
 			return validateOptionsAndMakeSink(changefeedbase.WebhookValidOptions, func() (Sink, error) {
 				return makeWebhookSink(ctx, sinkURL{URL: u}, encodingOpts, webhookOpts,
-					timeutil.DefaultTimeSource{}, metricsBuilder, newSinkPacer())
+					timeutil.DefaultTimeSource{}, metricsBuilder, newSinkPacer(ctx, serverCfg))
 			})
 		case isPubsubSink(u):
-			// TODO: add metrics to pubsubsink
-			return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg))
+			// // TODO: add metrics to pubsubsink
+			// return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg))
 
-			// var testingKnobs *TestingKnobs
-			// if knobs, ok := serverCfg.TestingKnobs.Changefeed.(*TestingKnobs); ok {
-			// 	testingKnobs = knobs
-			// }
-			// return makePubsubSink(ctx, u, encodingOpts, opts.GetPubsubConfigJSON(), AllTargets(feedCfg), timeutil.DefaultTimeSource{}, metricsBuilder, testingKnobs)
+			var testingKnobs *TestingKnobs
+			if knobs, ok := serverCfg.TestingKnobs.Changefeed.(*TestingKnobs); ok {
+				testingKnobs = knobs
+			}
+			return makePubsubSink(ctx, u, encodingOpts, opts.GetPubsubConfigJSON(), AllTargets(feedCfg), timeutil.DefaultTimeSource{}, metricsBuilder, testingKnobs, newSinkPacer(ctx, serverCfg))
 		case isCloudStorageSink(u):
 			return validateOptionsAndMakeSink(changefeedbase.CloudStorageValidOptions, func() (Sink, error) {
 				return makeCloudStorageSink(
@@ -770,6 +770,11 @@ func (sp *sinkPacer) Pace(ctx context.Context) {
 	}
 }
 
+func (sp *sinkPacer) Close() {
+	sp.pacer.Close()
+}
+
 type SinkPacer interface {
 	Pace(context.Context)
+	Close()
 }

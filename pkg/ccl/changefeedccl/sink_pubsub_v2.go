@@ -2,8 +2,9 @@ package changefeedccl
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/url"
-	"time"
 
 	"cloud.google.com/go/pubsub"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
@@ -31,32 +32,28 @@ var _ SinkClient = (*pubsubEmitter)(nil)
 
 func (pe *pubsubEmitter) EncodeBatch(msgs []messagePayload) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0, len(msgs))
-	// for _, msg := range msgs {
-	// 	var content []byte
-	// 	var err error
-	// 	topicName, err := pe.topicNamer.Name(msg.topic)
-	// 	if err != nil {
-	// 		return nil, err
-	// 	}
-	// 	switch pe.format {
-	// 	case changefeedbase.OptFormatJSON:
-	// 		content, err = json.Marshal(jsonPayload{
-	// 			Key:   msg.key,
-	// 			Value: msg.val,
-	// 			Topic: topicName,
-	// 		})
-	// 		if err != nil {
-	// 			return nil, err
-	// 		}
-	// 	case changefeedbase.OptFormatCSV:
-	// 		content = msg.val
-	// 	}
-	//
-	// 	sinkMessages = append(sinkMessages, pubsubMessagePayload{
-	// 		content: content,
-	// 		topic:   topicName,
-	// 	})
-	// }
+	for _, msg := range msgs {
+		var content []byte
+		var err error
+		switch pe.format {
+		case changefeedbase.OptFormatJSON:
+			content, err = json.Marshal(jsonPayload{
+				Key:   msg.key,
+				Value: msg.val,
+				Topic: msg.topic,
+			})
+			if err != nil {
+				return nil, err
+			}
+		case changefeedbase.OptFormatCSV:
+			content = msg.val
+		}
+
+		sinkMessages = append(sinkMessages, pubsubMessagePayload{
+			content: content,
+			topic:   msg.topic,
+		})
+	}
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
@@ -98,9 +95,9 @@ func (pe *pubsubEmitter) getTopicClient(topic string) (*pubsub.Topic, error) {
 			return nil, err
 		}
 	}
-	tc.PublishSettings.DelayThreshold = 100 * time.Minute
-	tc.PublishSettings.CountThreshold = 10000
-	tc.PublishSettings.ByteThreshold = 1e12
+	// tc.PublishSettings.DelayThreshold = 100 * time.Minute
+	// tc.PublishSettings.CountThreshold = 10000
+	// tc.PublishSettings.ByteThreshold = 1e12
 
 	return tc, nil
 }
@@ -148,6 +145,7 @@ func (pe *pubsubEmitter) EmitPayload(payload SinkPayload) error {
 
 func (pe *pubsubEmitter) Close() error {
 	if err := pe.topicNamer.Each(func(topic string) error {
+		fmt.Printf("\n\x1b[34m CLOSE TOPIC %s  \x1b[0m\n", topic)
 		t, err := pe.getTopicClient(topic)
 		if err != nil {
 			return err
@@ -158,6 +156,7 @@ func (pe *pubsubEmitter) Close() error {
 		return err
 	}
 
+	fmt.Printf("\n\x1b[34m CLOSE CLIENT  \x1b[0m\n")
 	return pe.client.Close()
 }
 
@@ -266,17 +265,33 @@ func makePubsubSink(
 	source timeutil.TimeSource,
 	mb metricsRecorderBuilder,
 	knobs *TestingKnobs,
+	pacer SinkPacer,
 ) (Sink, error) {
-	return nil, nil
-	// thinSink, err := makePubsubEmitter(ctx, u, encodingOpts, targets, knobs)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	//
-	// flushCfg, retryOpts, err := getWorkerConfigFromJson(jsonConfig)
-	// if err != nil {
-	// 	return nil, err
-	// }
-	// flushCfg.Messages = 100
-	// return makeBatchingWorkerSink(ctx, thinSink, flushCfg, retryOpts, source, mb)
+	sinkClient, err := makePubsubEmitter(ctx, u, encodingOpts, targets, knobs)
+	if err != nil {
+		return nil, err
+	}
+
+	flushCfg, retryOpts, err := getSinkConfigFromJson(jsonConfig)
+	if err != nil {
+		return nil, err
+	}
+
+	pubsubURL := sinkURL{URL: u, q: u.Query()}
+	pubsubTopicName := pubsubURL.consumeParam(changefeedbase.SinkParamTopicName)
+	topicNamer, err := MakeTopicNamer(targets, WithSingleName(pubsubTopicName))
+	if err != nil {
+		return nil, err
+	}
+
+	return makeParallelSinkEmitter(
+		ctx,
+		sinkClient,
+		flushCfg,
+		retryOpts,
+		int64(64),
+		topicNamer,
+		mb(requiresResourceAccounting),
+		pacer,
+	), nil
 }

@@ -76,7 +76,7 @@ func setupWebhookSinkWithDetails(
 		return nil, err
 	}
 	// TODO: use parallelism in tests
-	sinkSrc, err := makeWebhookSink(ctx, sinkURL{URL: u}, encodingOpts, sinkOpts, source, nilMetricsRecorderBuilder)
+	sinkSrc, err := makeWebhookSink(ctx, sinkURL{URL: u}, encodingOpts, sinkOpts, source, nilMetricsRecorderBuilder, &nilSinkPacer{})
 	if err != nil {
 		return nil, err
 	}

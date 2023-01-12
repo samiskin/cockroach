@@ -158,6 +158,7 @@ go_library(
         "@org_golang_google_api//option",
         "@org_golang_google_grpc//codes",
         "@org_golang_google_grpc//status",
+        "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_x_oauth2//google",
     ],
 )

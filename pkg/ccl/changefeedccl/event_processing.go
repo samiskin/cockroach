@@ -177,11 +177,11 @@ func newEventConsumer(
 		workerChSize: changefeedbase.EventConsumerWorkerQueueSize.Get(&cfg.Settings.SV),
 		spanFrontier: spanFrontier,
 	}
-	ss := sink
-	_, isAsyncSink := sink.(AsyncSink)
-	if !isAsyncSink {
-		ss = &safeSink{wrapped: sink}
-	}
+	// ss := sink
+	// _, isAsyncSink := sink.(AsyncSink)
+	// if !isAsyncSink {
+	ss := &safeSink{wrapped: sink}
+	// }
 	c.sink = ss
 
 	c.makeConsumer = func(workerId int64) (eventConsumer, error) {

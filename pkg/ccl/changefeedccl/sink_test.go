@@ -733,3 +733,12 @@ func TestKafkaSinkTracksMemory(t *testing.T) {
 	require.EqualValues(t, 0, p.outstanding())
 	require.EqualValues(t, 0, pool.used())
 }
+
+type nilSinkPacer struct {
+}
+
+func (n *nilSinkPacer) Pace(ctx context.Context) {
+}
+
+func (n *nilSinkPacer) Close() {
+}

@@ -127,8 +127,8 @@ func (te *testingBatchedEmitter) Empty() bool {
 }
 
 func (te *testingBatchedEmitter) Close() {
-	te.batchedSinkEmitter.Close()
-	te.sc.Close()
+	_ = te.batchedSinkEmitter.Close()
+	_ = te.sc.Close()
 }
 
 func makeTestingBatchEmitter(
@@ -146,6 +146,7 @@ func makeTestingBatchEmitter(
 			make(chan error, 1),
 			timeSource,
 			nilMetricsRecorderBuilder(false),
+			&nilSinkPacer{},
 		),
 		t: t,
 	}
