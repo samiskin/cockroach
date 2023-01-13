@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"google.golang.org/api/option"
 )
 
 // TestingKnobs are the testing knobs for changefeed.
@@ -34,7 +35,8 @@ type TestingKnobs struct {
 	// implementation.
 	WrapSink func(s Sink, jobID jobspb.JobID) Sink
 	// PubsubClientOverride, if set, overrides the client object used by the pubsub sink
-	PubsubClientOverride func(ctx context.Context) (*pubsub.Client, error)
+	PubsubClientOverride        func(ctx context.Context) (*pubsub.Client, error)
+	PubsubClientOptionsOverride func(ctx context.Context) []option.ClientOption
 	// FilterSpanWithMutation is a filter returning true if the resolved span event should
 	// be skipped. This method takes a pointer in case resolved spans need to be mutated.
 	FilterSpanWithMutation func(resolved *jobspb.ResolvedSpan) bool

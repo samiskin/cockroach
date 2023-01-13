@@ -7,20 +7,23 @@ import (
 	"net/url"
 
 	"cloud.google.com/go/pubsub"
+	pubsubv1 "cloud.google.com/go/pubsub/apiv1"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"google.golang.org/api/option"
+	pb "google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 type pubsubEmitter struct {
-	ctx        context.Context
-	client     *pubsub.Client
-	topicNamer *TopicNamer
-	format     changefeedbase.FormatType
-	topicCache map[string]*pubsub.Topic
+	ctx           context.Context
+	client        *pubsub.Client
+	publishClient *pubsubv1.PublisherClient
+	topicNamer    *TopicNamer
+	format        changefeedbase.FormatType
+	topicCache    map[string]*pubsub.Topic
 
 	// Topic creation errors may not be an actual issue unless the Publish call
 	// itself fails, so creation errors are stored for future use in the event of
@@ -108,37 +111,32 @@ func (pe *pubsubEmitter) EmitPayload(payload SinkPayload) error {
 		return errors.Errorf("cannot construct pubsub payload from given sinkPayload")
 	}
 
-	results := make([]*pubsub.PublishResult, 0)
-	topics := make(map[string]*pubsub.Topic)
-	for _, msg := range pbPayload.messages {
-		topicClient, ok := topics[msg.topic]
-		if !ok {
-			tc, err := pe.getTopicClient(msg.topic)
-			if err != nil {
-				return err
-			}
-			topics[msg.topic] = tc
-			topicClient = tc
-		}
+	// _, err := pe.getTopicClient(pbPayload.messages[0].topic)
+	_, err := pe.publishClient.CreateTopic(pe.ctx, &pb.Topic{Name: pbPayload.messages[0].topic})
+	if err != nil && status.Code(err) != codes.AlreadyExists {
+		return err
+	}
 
-		res := topicClient.Publish(pe.ctx, &pubsub.Message{
-			Data: msg.content,
-		})
-		results = append(results, res)
-	}
-	for _, tc := range topics {
-		tc.Flush()
-	}
-	for _, res := range results {
-		_, err := res.Get(pe.ctx)
-		if status.Code(err) == codes.NotFound && pe.topicCreateErr != nil {
-			return errors.WithHint(
-				errors.Wrap(pe.topicCreateErr,
-					"Topic not found, and attempt to autocreate it failed."),
-				"Create topics in advance or grant this service account the pubsub.editor role on your project.")
-		} else if err != nil {
-			return err
+	pbMsgs := make([]*pb.PubsubMessage, len(pbPayload.messages))
+	for i, msg := range pbPayload.messages {
+		pbMsgs[i] = &pb.PubsubMessage{
+			Data:        msg.content,
+			OrderingKey: "",
 		}
+	}
+
+	_, err = pe.publishClient.Publish(pe.ctx, &pb.PublishRequest{
+		Topic:    pbPayload.messages[0].topic,
+		Messages: pbMsgs,
+	})
+
+	if status.Code(err) == codes.NotFound && pe.topicCreateErr != nil {
+		return errors.WithHint(
+			errors.Wrap(pe.topicCreateErr,
+				"Topic not found, and attempt to autocreate it failed."),
+			"Create topics in advance or grant this service account the pubsub.editor role on your project.")
+	} else if err != nil {
+		return err
 	}
 	return nil
 }
@@ -214,12 +212,17 @@ func makePubsubEmitter(
 	if err != nil {
 		return nil, err
 	}
+	publisherClient, err := makePublisherClient(ctx, pubsubURL, knobs)
+	if err != nil {
+		return nil, err
+	}
 
 	thinSink := &pubsubEmitter{
-		ctx:        ctx,
-		client:     client,
-		topicNamer: topicNamer,
-		format:     formatType,
+		ctx:           ctx,
+		client:        client,
+		topicNamer:    topicNamer,
+		format:        formatType,
+		publishClient: publisherClient,
 	}
 
 	return thinSink, nil
@@ -253,6 +256,43 @@ func makeClient(ctx context.Context, url sinkURL) (*pubsub.Client, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "opening client")
 	}
+
+	return client, nil
+}
+
+func makePublisherClient(ctx context.Context, url sinkURL, knobs *TestingKnobs) (*pubsubv1.PublisherClient, error) {
+	const regionParam = "region"
+	var options []option.ClientOption
+	if knobs != nil && knobs.PubsubClientOptionsOverride != nil {
+		options = knobs.PubsubClientOptionsOverride(ctx)
+	} else {
+		projectID := url.Host
+		if projectID == "" {
+			return nil, errors.New("missing project name")
+		}
+		region := url.consumeParam(regionParam)
+		if region == "" {
+			return nil, errors.New("region query parameter not found")
+		}
+
+		creds, err := getGCPCredentials(ctx, url)
+		if err != nil {
+			return nil, err
+		}
+		options = []option.ClientOption{
+			creds,
+			option.WithEndpoint(gcpEndpointForRegion(region)),
+		}
+	}
+
+	client, err := pubsubv1.NewPublisherClient(
+		ctx,
+		options...,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "opening client")
+	}
+
 	return client, nil
 }
 

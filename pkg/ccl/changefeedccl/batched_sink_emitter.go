@@ -115,6 +115,7 @@ func (bs *batchedSinkEmitter) handleError(err error) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	if bs.mu.termErr == nil {
+		// TODO: Move this retryable somewhere else
 		bs.mu.termErr = changefeedbase.MarkRetryableError(err)
 	} else {
 		return

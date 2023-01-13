@@ -2344,6 +2344,9 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	if err != nil {
 		return nil, err
 	}
+	p.Server().DistSQLServer().(*distsql.ServerImpl).TestingKnobs.Changefeed.(*TestingKnobs).PubsubClientOptionsOverride = func(ctx context.Context) []option.ClientOption {
+		return []option.ClientOption{option.WithGRPCConn(conn)}
+	}
 
 	var wg sync.WaitGroup
 	var psEmitter *pubsubEmitter
