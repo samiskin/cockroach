@@ -922,7 +922,7 @@ func registerCDC(r registry.Registry) {
 
 			// exportStatsFile := ct.startStatsCollection()
 			feed := ct.newChangefeed(feedArgs{
-				sinkType: webhookSink,
+				sinkType: pubsubSink,
 				targets:  []string{"tpcc.order_line"},
 				opts:     map[string]string{"initial_scan": "'only'"},
 			})

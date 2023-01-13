@@ -67,8 +67,7 @@ func (pse *parallelSinkEmitter) Close() error {
 	close(pse.doneCh)
 	_ = pse.wg.Wait()
 	pse.pacer.Close()
-	_ = pse.client.Close()
-	return nil
+	return pse.client.Close()
 }
 
 func (pse *parallelSinkEmitter) Dial() error {

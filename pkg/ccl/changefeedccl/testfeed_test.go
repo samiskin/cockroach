@@ -29,7 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	pubsub "cloud.google.com/go/pubsub/apiv1"
 	"cloud.google.com/go/pubsub/pstest"
 	"github.com/Shopify/sarama"
 	"github.com/cockroachdb/cockroach-go/v2/crdb"
@@ -2158,7 +2158,6 @@ func (p *mockPubsubMessageBuffer) push(m mockPubsubMessage) {
 type fakePubsubServer struct {
 	srv      *pstest.Server
 	msgIndex int
-	conns    []*grpc.ClientConn
 	mu       struct {
 		syncutil.Mutex
 		buffer []mockPubsubMessage
@@ -2184,13 +2183,13 @@ func (ps *fakePubsubServer) React(req interface{}) (handled bool, ret interface{
 		ps.mu.Lock()
 		defer ps.mu.Unlock()
 		for _, msg := range publishReq.Messages {
-			fmt.Printf("\n\x1b[33m REACT (%+v)\x1b[0m\n", msg)
+			// fmt.Printf("\n\x1b[33m REACT (%+v)\x1b[0m\n", msg)
 			ps.mu.buffer = append(ps.mu.buffer, mockPubsubMessage{data: string(msg.Data)})
 		}
 		if ps.mu.notify != nil {
 			notifyCh := ps.mu.notify
 			ps.mu.notify = nil
-			fmt.Printf("\n\x1b[33m NOTIFYING \x1b[0m\n")
+			// fmt.Printf("\n\x1b[33m NOTIFYING \x1b[0m\n")
 			close(notifyCh)
 		}
 	}
@@ -2211,19 +2210,13 @@ func (s *fakePubsubServer) NotifyMessage() chan struct{} {
 }
 
 func (ps *fakePubsubServer) Dial() (*grpc.ClientConn, error) {
-	fmt.Printf("\n\x1b[31m DIAL %s \x1b[0m\n", ps.srv.Addr)
-	conn, err := grpc.Dial(ps.srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, err
-	}
-	ps.conns = append(ps.conns, conn)
-	return conn, nil
+	return grpc.Dial(ps.srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
 
 func (ps *fakePubsubServer) Pop() *mockPubsubMessage {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	fmt.Printf("\n\x1b[33m POP (%+v)\x1b[0m\n", len(ps.mu.buffer))
+	// fmt.Printf("\n\x1b[33m POP (%+v)\x1b[0m\n", len(ps.mu.buffer))
 	if len(ps.mu.buffer) == 0 {
 		return nil
 	}
@@ -2233,17 +2226,9 @@ func (ps *fakePubsubServer) Pop() *mockPubsubMessage {
 }
 
 func (ps *fakePubsubServer) Close() error {
-	for _, conn := range ps.conns {
-		err := conn.Close() // nolint:grpcconnclose
-		if err != nil {
-			return err
-		}
-	}
+	fmt.Printf("\x1b[31m FAKE PUBSUB SERVER CLOSE \x1b[0m\n")
 	ps.srv.Wait()
-	if err := ps.srv.Close(); err != nil {
-		return err
-	}
-	return nil
+	return ps.srv.Close()
 }
 
 type fakePubsubClient struct {
@@ -2308,6 +2293,17 @@ var _ cdctest.TestFeedFactory = (*pubsubFeedFactory)(nil)
 // makePubsubFeedFactory returns a TestFeedFactory implementation using the `pubsub` uri.
 func makePubsubFeedFactory(srvOrCluster interface{}, db *gosql.DB) cdctest.TestFeedFactory {
 	s, injectables := getInjectables(srvOrCluster)
+
+	switch t := srvOrCluster.(type) {
+	case serverutils.TestTenantInterface:
+		t.DistSQLServer().(*distsql.ServerImpl).TestingKnobs.Changefeed.(*TestingKnobs).PubsubClientSkipCredentialsCheck = true
+	case serverutils.TestClusterInterface:
+		servers := make([]feedInjectable, t.NumServers())
+		for i := range servers {
+			t.Server(i).DistSQLServer().(*distsql.ServerImpl).TestingKnobs.Changefeed.(*TestingKnobs).PubsubClientSkipCredentialsCheck = true
+		}
+	}
+
 	return &pubsubFeedFactory{
 		enterpriseFeedFactory: enterpriseFeedFactory{
 			s:  s,
@@ -2330,41 +2326,21 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	}
 
 	mockServer := makeFakePubsubServer()
-	p.Server().DistSQLServer().(*distsql.ServerImpl).TestingKnobs.Changefeed.(*TestingKnobs).PubsubClientOverride = func(ctx context.Context) (*pubsub.Client, error) {
-		client, err := pubsub.NewClient(
-			ctx,
-			"testfeed",
-		)
-		if err == nil {
-			_ = client.Close()
-		}
-		return client, err
-	}
-	conn, err := mockServer.Dial()
 	if err != nil {
 		return nil, err
 	}
-	p.Server().DistSQLServer().(*distsql.ServerImpl).TestingKnobs.Changefeed.(*TestingKnobs).PubsubClientOptionsOverride = func(ctx context.Context) []option.ClientOption {
-		return []option.ClientOption{option.WithGRPCConn(conn)}
-	}
 
 	var wg sync.WaitGroup
-	var psEmitter *pubsubEmitter
 	done := make(chan struct{})
 	ss := &sinkSynchronizer{}
 	wrapSink := func(s Sink) Sink {
 		if parallelEmitter, ok := s.(*parallelSinkEmitter); ok {
-			if emitter, ok := parallelEmitter.client.(*pubsubEmitter); ok {
-				client, err := pubsub.NewClient(
-					context.Background(), "testfeed", option.WithGRPCConn(conn),
-				)
-				if err == nil {
-					emitter.client = client
-				}
-				psEmitter = emitter
+			if sinkClient, ok := parallelEmitter.client.(*pubsubSinkClient); ok {
+				_ = sinkClient.client.Close()
+				conn, _ := mockServer.Dial()
+				sinkClient.client, err = pubsub.NewPublisherClient(context.Background(), option.WithGRPCConn(conn))
 			}
-			// return wrapAsyncSink(parallelEmitter, &wg, done, ss)
-			return &wrappedPubsubSink{wrapAsyncSink(parallelEmitter, &wg, done, ss)}
+			return wrapAsyncSink(parallelEmitter, &wg, done, ss)
 		}
 		return s
 	}
@@ -2374,13 +2350,6 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 			rows: make([]mockPubsubMessage, 0),
 		},
 	}
-	// wrapSink := func(s Sink) Sink {
-	// 	return &fakePubsubSink{
-	// 		Sink:   s,
-	// 		client: client,
-	// 		sync:   ss,
-	// 	}
-	// }
 
 	c := &pubsubFeed{
 		jobFeed:        newJobFeed(p.jobsTableConn(), wrapSink),
@@ -2390,10 +2359,10 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 		doneCh:         done,
 		wg:             &wg,
 		mockServer:     mockServer,
-		emitter:        psEmitter,
 	}
 
 	if err := p.startFeedJob(c.jobFeed, createStmt.String(), args...); err != nil {
+		_ = mockServer.Close()
 		return nil, err
 	}
 	return c, nil
@@ -2410,9 +2379,9 @@ type pubsubFeed struct {
 	ss         *sinkSynchronizer
 	client     *fakePubsubClient
 	mockServer *fakePubsubServer
-	emitter    *pubsubEmitter
-	wg         *sync.WaitGroup
-	doneCh     chan struct{}
+	// emitter    *pubsubEmitter
+	wg     *sync.WaitGroup
+	doneCh chan struct{}
 }
 
 var _ cdctest.TestFeed = (*pubsubFeed)(nil)
@@ -2514,9 +2483,6 @@ func (p *pubsubFeed) Close() error {
 	}
 	close(p.doneCh)
 	p.wg.Wait()
-	if p.emitter != nil {
-		_ = p.emitter.Close()
-	}
 	_ = p.mockServer.Close()
 	return nil
 }

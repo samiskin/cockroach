@@ -77,7 +77,7 @@ func makeWebhookSink(
 	), nil
 }
 
-type webhookEmitter struct {
+type webhookSinkClient struct {
 	ctx        context.Context
 	format     changefeedbase.FormatType
 	url        sinkURL
@@ -85,7 +85,7 @@ type webhookEmitter struct {
 	client     *httputil.Client
 }
 
-var _ SinkClient = (*webhookEmitter)(nil)
+var _ SinkClient = (*webhookSinkClient)(nil)
 
 func makeWebhookSinkClient(
 	ctx context.Context,
@@ -100,7 +100,7 @@ func makeWebhookSinkClient(
 
 	u.Scheme = strings.TrimPrefix(u.Scheme, `webhook-`)
 
-	sink := &webhookEmitter{
+	sinkClient := &webhookSinkClient{
 		ctx:        ctx,
 		authHeader: opts.AuthHeader,
 		format:     encodingOpts.Format,
@@ -110,7 +110,7 @@ func makeWebhookSinkClient(
 	if opts.ClientTimeout != nil {
 		connTimeout = *opts.ClientTimeout
 	}
-	sink.client, err = makeWebhookClient(u, connTimeout)
+	sinkClient.client, err = makeWebhookClient(u, connTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -126,9 +126,9 @@ func makeWebhookSinkClient(
 	params.Del(changefeedbase.SinkParamClientCert)
 	params.Del(changefeedbase.SinkParamClientKey)
 	sinkURLParsed.RawQuery = params.Encode()
-	sink.url = sinkURL{URL: sinkURLParsed}
+	sinkClient.url = sinkURL{URL: sinkURLParsed}
 
-	return sink, nil
+	return sinkClient, nil
 }
 
 func makeWebhookClient(u sinkURL, timeout time.Duration) (*httputil.Client, error) {
@@ -203,7 +203,7 @@ func makeWebhookClient(u sinkURL, timeout time.Duration) (*httputil.Client, erro
 	return client, nil
 }
 
-func (we *webhookEmitter) makePayloadForBytes(body []byte) (SinkPayload, error) {
+func (we *webhookSinkClient) makePayloadForBytes(body []byte) (SinkPayload, error) {
 	req, err := http.NewRequestWithContext(we.ctx, http.MethodPost, we.url.String(), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -222,7 +222,7 @@ func (we *webhookEmitter) makePayloadForBytes(body []byte) (SinkPayload, error) 
 	return req, nil
 }
 
-func (we *webhookEmitter) EncodeBatch(batch []messagePayload) (SinkPayload, error) {
+func (we *webhookSinkClient) EncodeBatch(batch []messagePayload) (SinkPayload, error) {
 	var reqBody []byte
 	var err error
 
@@ -270,13 +270,13 @@ func encodeWebhookMsgCSV(messages []messagePayload) ([]byte, error) {
 	return mergedMsgs, nil
 }
 
-func (we *webhookEmitter) EncodeResolvedMessage(
+func (we *webhookSinkClient) EncodeResolvedMessage(
 	payload resolvedMessagePayload,
 ) (SinkPayload, error) {
 	return we.makePayloadForBytes(payload.body)
 }
 
-func (we *webhookEmitter) EmitPayload(batch SinkPayload) error {
+func (we *webhookSinkClient) EmitPayload(batch SinkPayload) error {
 	req := batch.(*http.Request)
 	res, err := we.client.Do(req)
 	if err != nil {
@@ -294,7 +294,7 @@ func (we *webhookEmitter) EmitPayload(batch SinkPayload) error {
 	return nil
 }
 
-func (we *webhookEmitter) Close() error {
+func (we *webhookSinkClient) Close() error {
 	we.client.CloseIdleConnections()
 	return nil
 }

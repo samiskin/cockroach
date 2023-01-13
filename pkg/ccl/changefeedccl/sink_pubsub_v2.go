@@ -3,12 +3,11 @@ package changefeedccl
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/url"
 
-	"cloud.google.com/go/pubsub"
-	pubsubv1 "cloud.google.com/go/pubsub/apiv1"
+	pubsub "cloud.google.com/go/pubsub/apiv1"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"google.golang.org/api/option"
@@ -17,13 +16,15 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-type pubsubEmitter struct {
-	ctx           context.Context
-	client        *pubsub.Client
-	publishClient *pubsubv1.PublisherClient
-	topicNamer    *TopicNamer
-	format        changefeedbase.FormatType
-	topicCache    map[string]*pubsub.Topic
+type pubsubSinkClient struct {
+	ctx        context.Context
+	client     *pubsub.PublisherClient
+	topicNamer *TopicNamer
+	format     changefeedbase.FormatType
+	mu         struct {
+		syncutil.RWMutex
+		topicCache map[string]struct{}
+	}
 
 	// Topic creation errors may not be an actual issue unless the Publish call
 	// itself fails, so creation errors are stored for future use in the event of
@@ -31,9 +32,9 @@ type pubsubEmitter struct {
 	topicCreateErr error
 }
 
-var _ SinkClient = (*pubsubEmitter)(nil)
+var _ SinkClient = (*pubsubSinkClient)(nil)
 
-func (pe *pubsubEmitter) EncodeBatch(msgs []messagePayload) (SinkPayload, error) {
+func (pe *pubsubSinkClient) EncodeBatch(msgs []messagePayload) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0, len(msgs))
 	for _, msg := range msgs {
 		var content []byte
@@ -60,7 +61,7 @@ func (pe *pubsubEmitter) EncodeBatch(msgs []messagePayload) (SinkPayload, error)
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
-func (pe *pubsubEmitter) EncodeResolvedMessage(
+func (pe *pubsubSinkClient) EncodeResolvedMessage(
 	payload resolvedMessagePayload,
 ) (SinkPayload, error) {
 	sinkMessages := make([]pubsubMessagePayload, 0)
@@ -77,43 +78,44 @@ func (pe *pubsubEmitter) EncodeResolvedMessage(
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
-func (pe *pubsubEmitter) getTopicClient(topic string) (*pubsub.Topic, error) {
-	tc, ok := pe.topicCache[topic]
+func (pe *pubsubSinkClient) maybeMakeTopic(topic string) error {
+	pe.mu.RLock()
+	_, ok := pe.mu.topicCache[topic]
 	if ok {
-		return tc, nil
+		pe.mu.RUnlock()
+		return nil
+	}
+	pe.mu.RUnlock()
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+	_, ok = pe.mu.topicCache[topic]
+	if ok {
+		return nil
 	}
 
-	tc, err := pe.client.CreateTopic(pe.ctx, topic)
-	if err != nil {
-		switch status.Code(err) {
-		case codes.AlreadyExists:
-			tc = pe.client.Topic(topic)
-		case codes.PermissionDenied:
+	_, err := pe.client.CreateTopic(pe.ctx, &pb.Topic{Name: topic})
+	if err != nil && status.Code(err) != codes.AlreadyExists {
+		if status.Code(err) == codes.PermissionDenied {
 			// PermissionDenied may not be fatal if the topic already exists,
 			// but record it in case it turns out not to.
 			pe.topicCreateErr = err
-			tc = pe.client.Topic(topic)
-		default:
+		} else {
 			pe.topicCreateErr = err
-			return nil, err
+			return err
 		}
 	}
-	// tc.PublishSettings.DelayThreshold = 100 * time.Minute
-	// tc.PublishSettings.CountThreshold = 10000
-	// tc.PublishSettings.ByteThreshold = 1e12
-
-	return tc, nil
+	pe.mu.topicCache[topic] = struct{}{}
+	return nil
 }
 
-func (pe *pubsubEmitter) EmitPayload(payload SinkPayload) error {
+func (pe *pubsubSinkClient) EmitPayload(payload SinkPayload) error {
 	pbPayload, ok := payload.(pubsubPayload)
 	if !ok {
 		return errors.Errorf("cannot construct pubsub payload from given sinkPayload")
 	}
 
-	// _, err := pe.getTopicClient(pbPayload.messages[0].topic)
-	_, err := pe.publishClient.CreateTopic(pe.ctx, &pb.Topic{Name: pbPayload.messages[0].topic})
-	if err != nil && status.Code(err) != codes.AlreadyExists {
+	err := pe.maybeMakeTopic(pbPayload.messages[0].topic)
+	if err != nil {
 		return err
 	}
 
@@ -125,7 +127,7 @@ func (pe *pubsubEmitter) EmitPayload(payload SinkPayload) error {
 		}
 	}
 
-	_, err = pe.publishClient.Publish(pe.ctx, &pb.PublishRequest{
+	_, err = pe.client.Publish(pe.ctx, &pb.PublishRequest{
 		Topic:    pbPayload.messages[0].topic,
 		Messages: pbMsgs,
 	})
@@ -141,20 +143,7 @@ func (pe *pubsubEmitter) EmitPayload(payload SinkPayload) error {
 	return nil
 }
 
-func (pe *pubsubEmitter) Close() error {
-	if err := pe.topicNamer.Each(func(topic string) error {
-		fmt.Printf("\n\x1b[34m CLOSE TOPIC %s  \x1b[0m\n", topic)
-		t, err := pe.getTopicClient(topic)
-		if err != nil {
-			return err
-		}
-		t.Stop()
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	fmt.Printf("\n\x1b[34m CLOSE CLIENT  \x1b[0m\n")
+func (pe *pubsubSinkClient) Close() error {
 	return pe.client.Close()
 }
 
@@ -166,7 +155,7 @@ type pubsubPayload struct {
 	messages []pubsubMessagePayload
 }
 
-func makePubsubEmitter(
+func makePubsubSinkClient(
 	ctx context.Context,
 	u *url.URL,
 	encodingOpts changefeedbase.EncodingOptions,
@@ -203,32 +192,25 @@ func makePubsubEmitter(
 		return nil, err
 	}
 
-	var client *pubsub.Client
-	if knobs != nil && knobs.PubsubClientOverride != nil {
-		client, err = knobs.PubsubClientOverride(ctx)
-	} else {
-		client, err = makeClient(ctx, pubsubURL)
-	}
-	if err != nil {
-		return nil, err
-	}
 	publisherClient, err := makePublisherClient(ctx, pubsubURL, knobs)
 	if err != nil {
 		return nil, err
 	}
 
-	thinSink := &pubsubEmitter{
-		ctx:           ctx,
-		client:        client,
-		topicNamer:    topicNamer,
-		format:        formatType,
-		publishClient: publisherClient,
+	sinkClient := &pubsubSinkClient{
+		ctx:        ctx,
+		topicNamer: topicNamer,
+		format:     formatType,
+		client:     publisherClient,
 	}
+	sinkClient.mu.topicCache = make(map[string]struct{})
 
-	return thinSink, nil
+	return sinkClient, nil
 }
 
-func makeClient(ctx context.Context, url sinkURL) (*pubsub.Client, error) {
+func makePublisherClient(
+	ctx context.Context, url sinkURL, knobs *TestingKnobs,
+) (*pubsub.PublisherClient, error) {
 	const regionParam = "region"
 	projectID := url.Host
 	if projectID == "" {
@@ -239,53 +221,19 @@ func makeClient(ctx context.Context, url sinkURL) (*pubsub.Client, error) {
 		return nil, errors.New("region query parameter not found")
 	}
 
-	creds, err := getGCPCredentials(ctx, url)
-	if err != nil {
-		return nil, err
-	}
 	options := []option.ClientOption{
-		creds,
 		option.WithEndpoint(gcpEndpointForRegion(region)),
 	}
 
-	client, err := pubsub.NewClient(
-		ctx,
-		projectID,
-		options...,
-	)
-	if err != nil {
-		return nil, errors.Wrap(err, "opening client")
-	}
-
-	return client, nil
-}
-
-func makePublisherClient(ctx context.Context, url sinkURL, knobs *TestingKnobs) (*pubsubv1.PublisherClient, error) {
-	const regionParam = "region"
-	var options []option.ClientOption
-	if knobs != nil && knobs.PubsubClientOptionsOverride != nil {
-		options = knobs.PubsubClientOptionsOverride(ctx)
-	} else {
-		projectID := url.Host
-		if projectID == "" {
-			return nil, errors.New("missing project name")
-		}
-		region := url.consumeParam(regionParam)
-		if region == "" {
-			return nil, errors.New("region query parameter not found")
-		}
-
+	if knobs == nil || !knobs.PubsubClientSkipCredentialsCheck {
 		creds, err := getGCPCredentials(ctx, url)
 		if err != nil {
 			return nil, err
 		}
-		options = []option.ClientOption{
-			creds,
-			option.WithEndpoint(gcpEndpointForRegion(region)),
-		}
+		options = append(options, creds)
 	}
 
-	client, err := pubsubv1.NewPublisherClient(
+	client, err := pubsub.NewPublisherClient(
 		ctx,
 		options...,
 	)
@@ -307,7 +255,7 @@ func makePubsubSink(
 	knobs *TestingKnobs,
 	pacer SinkPacer,
 ) (Sink, error) {
-	sinkClient, err := makePubsubEmitter(ctx, u, encodingOpts, targets, knobs)
+	sinkClient, err := makePubsubSinkClient(ctx, u, encodingOpts, targets, knobs)
 	if err != nil {
 		return nil, err
 	}
