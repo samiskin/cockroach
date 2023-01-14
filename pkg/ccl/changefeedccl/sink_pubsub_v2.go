@@ -58,7 +58,6 @@ func (pe *pubsubSinkClient) EncodeBatch(msgs []messagePayload) (SinkPayload, err
 
 		sinkMessages = append(sinkMessages, pubsubMessagePayload{
 			content: content,
-			topic:   msg.topic,
 		})
 	}
 	return pubsubPayload{messages: sinkMessages}, nil
@@ -71,7 +70,6 @@ func (pe *pubsubSinkClient) EncodeResolvedMessage(
 	if err := pe.topicNamer.Each(func(topic string) error {
 		sinkMessages = append(sinkMessages, pubsubMessagePayload{
 			content: payload.body,
-			topic:   topic,
 		})
 		return nil
 	}); err != nil {
@@ -115,13 +113,13 @@ func (pe *pubsubSinkClient) maybeMakeTopic(topic string) error {
 	return nil
 }
 
-func (pe *pubsubSinkClient) EmitPayload(payload SinkPayload) error {
+func (pe *pubsubSinkClient) EmitPayload(topic string, payload SinkPayload) error {
 	pbPayload, ok := payload.(pubsubPayload)
 	if !ok {
 		return errors.Errorf("cannot construct pubsub payload from given sinkPayload")
 	}
 
-	err := pe.maybeMakeTopic(pbPayload.messages[0].topic)
+	err := pe.maybeMakeTopic(topic)
 	if err != nil {
 		return err
 	}
@@ -135,7 +133,7 @@ func (pe *pubsubSinkClient) EmitPayload(payload SinkPayload) error {
 	}
 
 	_, err = pe.client.Publish(pe.ctx, &pb.PublishRequest{
-		Topic:    pe.gcPubsubTopic(pbPayload.messages[0].topic),
+		Topic:    pe.gcPubsubTopic(topic),
 		Messages: pbMsgs,
 	})
 
@@ -156,7 +154,6 @@ func (pe *pubsubSinkClient) Close() error {
 
 type pubsubMessagePayload struct {
 	content []byte
-	topic   string
 }
 type pubsubPayload struct {
 	messages []pubsubMessagePayload
@@ -199,14 +196,14 @@ func makePubsubSinkClient(
 		return nil, err
 	}
 
-	publisherClient, err := makePublisherClient(ctx, pubsubURL, knobs)
-	if err != nil {
-		return nil, err
-	}
-
 	projectID := pubsubURL.Host
 	if projectID == "" {
 		return nil, errors.New("missing project name")
+	}
+
+	publisherClient, err := makePublisherClient(ctx, pubsubURL, knobs)
+	if err != nil {
+		return nil, err
 	}
 
 	sinkClient := &pubsubSinkClient{

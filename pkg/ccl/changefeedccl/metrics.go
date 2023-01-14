@@ -217,18 +217,30 @@ func (m *sliMetrics) getBackfillCallback() func() func() {
 }
 
 func (m *sliMetrics) recordParallelEmitterAdmit() {
+	if m == nil {
+		return
+	}
 	m.ParallelSinkEmitterAdmitCount.Inc(1)
 	m.ParallelSinkEmitterBufferedEvents.Inc(1)
 }
 func (m *sliMetrics) recordParallelEmitterEmit() {
+	if m == nil {
+		return
+	}
 	m.ParallelSinkEmitterBufferedEvents.Dec(1)
 }
 
 func (m *sliMetrics) recordBatchingEmitterAdmit() {
+	if m == nil {
+		return
+	}
 	m.BatchingSinkEmitterAdmitCount.Inc(1)
 	m.BatchingSinkEmitterBufferedEvents.Inc(1)
 }
 func (m *sliMetrics) recordBatchingEmitterEmit(numFlushed int) {
+	if m == nil {
+		return
+	}
 	m.BatchingSinkEmitterBufferedEvents.Dec(int64(numFlushed))
 }
 

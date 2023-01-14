@@ -276,7 +276,7 @@ func (we *webhookSinkClient) EncodeResolvedMessage(
 	return we.makePayloadForBytes(payload.body)
 }
 
-func (we *webhookSinkClient) EmitPayload(batch SinkPayload) error {
+func (we *webhookSinkClient) EmitPayload(_ string, batch SinkPayload) error {
 	req := batch.(*http.Request)
 	res, err := we.client.Do(req)
 	if err != nil {

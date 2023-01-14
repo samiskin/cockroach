@@ -154,19 +154,29 @@ func (pse *parallelSinkEmitter) EmitRow(
 }
 
 func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
-	emitter := makeBatchedSinkEmitter(
-		pse.ctx,
-		pse.client,
-		pse.batchCfg,
-		pse.retryOpts,
-		pse.successCh,
-		pse.errorCh,
-		timeutil.DefaultTimeSource{},
-		pse.metrics,
-		pse.pacer,
-	)
+	// Since topics usually have their own endpoints to flush to, they can each be
+	// their own batcher
+	topicEmitters := make(map[string]*batchedSinkEmitter)
+	makeTopicEmitter := func(topic string) *batchedSinkEmitter {
+		emitter := makeBatchedSinkEmitter(
+			pse.ctx,
+			topic,
+			pse.client,
+			pse.batchCfg,
+			pse.retryOpts,
+			pse.successCh,
+			pse.errorCh,
+			timeutil.DefaultTimeSource{},
+			pse.metrics,
+			pse.pacer,
+		)
+		topicEmitters[topic] = emitter
+		return emitter
+	}
 	defer func() {
-		_ = emitter.Close()
+		for _, emitter := range topicEmitters {
+			_ = emitter.Close()
+		}
 	}()
 
 	for {
@@ -178,6 +188,11 @@ func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
 		case <-pse.doneCh:
 			return nil
 		case row := <-input:
+			emitter, ok := topicEmitters[row.msg.topic]
+			if !ok {
+				emitter = makeTopicEmitter(row.msg.topic)
+			}
+
 			emitter.Emit(row)
 			pse.metrics.recordParallelEmitterEmit()
 		}
@@ -213,7 +228,7 @@ func (pse *parallelSinkEmitter) EmitResolvedTimestamp(
 		if err != nil {
 			return err
 		}
-		err = emitWithRetries(pse.ctx, payload, 1, pse.client, pse.retryOpts, pse.metrics)
+		err = emitWithRetries(pse.ctx, topic, payload, 1, pse.client, pse.retryOpts, pse.metrics)
 		if err != nil {
 			return err
 		}

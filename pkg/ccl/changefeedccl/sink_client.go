@@ -14,7 +14,7 @@ import (
 type SinkClient interface {
 	EncodeBatch([]messagePayload) (SinkPayload, error)
 	EncodeResolvedMessage(resolvedMessagePayload) (SinkPayload, error)
-	EmitPayload(SinkPayload) error
+	EmitPayload(topic string, payload SinkPayload) error
 	Close() error
 }
 
@@ -38,6 +38,7 @@ type resolvedMessagePayload struct {
 
 func emitWithRetries(
 	ctx context.Context,
+	topic string,
 	payload SinkPayload,
 	numMessages int,
 	emitter SinkClient,
@@ -49,7 +50,7 @@ func emitWithRetries(
 		if !initialSend {
 			metrics.recordInternalRetry(int64(numMessages), false)
 		}
-		err := emitter.EmitPayload(payload)
+		err := emitter.EmitPayload(topic, payload)
 		initialSend = false
 		return err
 	})

@@ -669,8 +669,7 @@ func defaultRetryConfig() retry.Options {
 }
 
 func getSinkConfigFromJson(
-	jsonStr changefeedbase.SinkSpecificJSONConfig,
-	base sinkJSONConfig,
+	jsonStr changefeedbase.SinkSpecificJSONConfig, base sinkJSONConfig,
 ) (batchCfg sinkBatchConfig, retryCfg retry.Options, err error) {
 	retryCfg = defaultRetryConfig()
 

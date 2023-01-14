@@ -14,8 +14,9 @@ import (
 )
 
 type batchedSinkEmitter struct {
-	ctx context.Context
-	sc  SinkClient
+	ctx   context.Context
+	sc    SinkClient
+	topic string
 
 	batchCfg  sinkBatchConfig
 	retryOpts retry.Options
@@ -39,6 +40,7 @@ type batchedSinkEmitter struct {
 
 func makeBatchedSinkEmitter(
 	ctx context.Context,
+	topic string,
 	sink SinkClient,
 	config sinkBatchConfig,
 	retryOpts retry.Options,
@@ -48,17 +50,17 @@ func makeBatchedSinkEmitter(
 	metrics metricsRecorder,
 	pacer SinkPacer,
 ) *batchedSinkEmitter {
-
 	bs := batchedSinkEmitter{
 		ctx:       ctx,
 		sc:        sink,
+		topic:     topic,
 		batchCfg:  config,
 		retryOpts: retryOpts,
 
 		successCh: successCh,
 		errorCh:   errorCh,
 
-		rowCh:        make(chan rowPayload, 256),
+		rowCh:        make(chan rowPayload, 64),
 		forceFlushCh: make(chan struct{}, 1),
 		doneCh:       make(chan struct{}),
 		wg:           ctxgroup.WithContext(ctx),
@@ -147,7 +149,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 	// Emitting a batch is a blocking I/O operation so performing it in its own
 	// goroutine allows for the next batch to be constructed and queued up in
 	// parallel.
-	batchCh := make(chan batchWorkerMessage, 256)
+	batchCh := make(chan batchWorkerMessage, 64)
 	bs.wg.GoCtx(func(ctx context.Context) error {
 		return bs.startEmitWorker(batchCh)
 	})
@@ -189,9 +191,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 	flushTimer := bs.timeSource.NewTimer()
 
 	for {
-		if bs.pacer != nil {
-			bs.pacer.Pace(bs.ctx)
-		}
+		bs.pacer.Pace(bs.ctx)
 
 		select {
 		case <-bs.ctx.Done():
@@ -236,9 +236,7 @@ func (bs *batchedSinkEmitter) isTerminated() bool {
 
 func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) error {
 	for {
-		if bs.pacer != nil {
-			bs.pacer.Pace(bs.ctx)
-		}
+		bs.pacer.Pace(bs.ctx)
 
 		select {
 		case <-bs.ctx.Done():
@@ -252,7 +250,7 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) e
 			}
 
 			flushCallback := bs.metrics.recordFlushRequestCallback()
-			err := emitWithRetries(bs.ctx, batch.sinkPayload, batch.numMessages, bs.sc, bs.retryOpts, bs.metrics)
+			err := emitWithRetries(bs.ctx, bs.topic, batch.sinkPayload, batch.numMessages, bs.sc, bs.retryOpts, bs.metrics)
 			if err != nil {
 				bs.handleError(err)
 			}

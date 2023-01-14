@@ -46,7 +46,7 @@ func (tc *testingSinkClient) EncodeResolvedMessage(p resolvedMessagePayload) (Si
 	return p, nil
 }
 
-func (tc *testingSinkClient) EmitPayload(payload SinkPayload) error {
+func (tc *testingSinkClient) EmitPayload(topic string, payload SinkPayload) error {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	if tc.mu.pendingEmitErrors > 0 {
@@ -137,6 +137,7 @@ func makeTestingBatchEmitter(
 	return testingBatchedEmitter{
 		batchedSinkEmitter: *makeBatchedSinkEmitter(
 			context.Background(),
+			"test",
 			&testingSinkClient{
 				emittedBatches: make([][]messagePayload, 0),
 			},
