@@ -3,7 +3,9 @@ package changefeedccl
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"time"
 
 	pubsub "cloud.google.com/go/pubsub/apiv1"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
@@ -20,6 +22,7 @@ type pubsubSinkClient struct {
 	ctx        context.Context
 	client     *pubsub.PublisherClient
 	topicNamer *TopicNamer
+	projectID  string
 	format     changefeedbase.FormatType
 	mu         struct {
 		syncutil.RWMutex
@@ -78,6 +81,10 @@ func (pe *pubsubSinkClient) EncodeResolvedMessage(
 	return pubsubPayload{messages: sinkMessages}, nil
 }
 
+func (pe *pubsubSinkClient) gcPubsubTopic(topic string) string {
+	return fmt.Sprintf("projects/%s/topics/%s", pe.projectID, topic)
+}
+
 func (pe *pubsubSinkClient) maybeMakeTopic(topic string) error {
 	pe.mu.RLock()
 	_, ok := pe.mu.topicCache[topic]
@@ -93,7 +100,7 @@ func (pe *pubsubSinkClient) maybeMakeTopic(topic string) error {
 		return nil
 	}
 
-	_, err := pe.client.CreateTopic(pe.ctx, &pb.Topic{Name: topic})
+	_, err := pe.client.CreateTopic(pe.ctx, &pb.Topic{Name: pe.gcPubsubTopic(topic)})
 	if err != nil && status.Code(err) != codes.AlreadyExists {
 		if status.Code(err) == codes.PermissionDenied {
 			// PermissionDenied may not be fatal if the topic already exists,
@@ -128,7 +135,7 @@ func (pe *pubsubSinkClient) EmitPayload(payload SinkPayload) error {
 	}
 
 	_, err = pe.client.Publish(pe.ctx, &pb.PublishRequest{
-		Topic:    pbPayload.messages[0].topic,
+		Topic:    pe.gcPubsubTopic(pbPayload.messages[0].topic),
 		Messages: pbMsgs,
 	})
 
@@ -197,11 +204,17 @@ func makePubsubSinkClient(
 		return nil, err
 	}
 
+	projectID := pubsubURL.Host
+	if projectID == "" {
+		return nil, errors.New("missing project name")
+	}
+
 	sinkClient := &pubsubSinkClient{
 		ctx:        ctx,
 		topicNamer: topicNamer,
 		format:     formatType,
 		client:     publisherClient,
+		projectID:  projectID,
 	}
 	sinkClient.mu.topicCache = make(map[string]struct{})
 
@@ -212,10 +225,6 @@ func makePublisherClient(
 	ctx context.Context, url sinkURL, knobs *TestingKnobs,
 ) (*pubsub.PublisherClient, error) {
 	const regionParam = "region"
-	projectID := url.Host
-	if projectID == "" {
-		return nil, errors.New("missing project name")
-	}
 	region := url.consumeParam(regionParam)
 	if region == "" {
 		return nil, errors.New("region query parameter not found")
@@ -260,7 +269,14 @@ func makePubsubSink(
 		return nil, err
 	}
 
-	flushCfg, retryOpts, err := getSinkConfigFromJson(jsonConfig)
+	flushCfg, retryOpts, err := getSinkConfigFromJson(jsonConfig, sinkJSONConfig{
+		// GCPubsub defaults
+		Flush: sinkBatchConfig{
+			Frequency: jsonDuration(10 * time.Millisecond),
+			Messages:  100,
+			Bytes:     1e6,
+		},
+	})
 	if err != nil {
 		return nil, err
 	}

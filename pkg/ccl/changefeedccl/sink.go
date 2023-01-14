@@ -188,7 +188,7 @@ func getSink(
 			})
 		case isPubsubSink(u):
 			// // TODO: add metrics to pubsubsink
-			// return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg))
+			// return MakePubsubSink(ctx, u, encodingOpts, AllTargets(feedCfg), metricsBuilder)
 
 			var testingKnobs *TestingKnobs
 			if knobs, ok := serverCfg.TestingKnobs.Changefeed.(*TestingKnobs); ok {
@@ -670,10 +670,11 @@ func defaultRetryConfig() retry.Options {
 
 func getSinkConfigFromJson(
 	jsonStr changefeedbase.SinkSpecificJSONConfig,
+	base sinkJSONConfig,
 ) (batchCfg sinkBatchConfig, retryCfg retry.Options, err error) {
 	retryCfg = defaultRetryConfig()
 
-	var cfg sinkJSONConfig
+	var cfg = base
 	cfg.Retry.Max = jsonMaxRetries(retryCfg.MaxRetries)
 	cfg.Retry.Backoff = jsonDuration(retryCfg.InitialBackoff)
 	if jsonStr != `` {
@@ -761,13 +762,13 @@ type sinkPacer struct {
 }
 
 func (sp *sinkPacer) Pace(ctx context.Context) {
-	if sp.pacer != nil {
-		if err := sp.pacer.Pace(ctx); err != nil {
-			if pacerLogEvery.ShouldLog() {
-				log.Errorf(ctx, "automatic sink pacing: %v", err)
-			}
-		}
-	}
+	// if sp.pacer != nil {
+	// 	if err := sp.pacer.Pace(ctx); err != nil {
+	// 		if pacerLogEvery.ShouldLog() {
+	// 			log.Errorf(ctx, "automatic sink pacing: %v", err)
+	// 		}
+	// 	}
+	// }
 }
 
 func (sp *sinkPacer) Close() {

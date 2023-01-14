@@ -44,6 +44,7 @@ type AggMetrics struct {
 	FlushedBytes              *aggmetric.AggCounter
 	BatchHistNanos            *aggmetric.AggHistogram
 	Flushes                   *aggmetric.AggCounter
+	FlushMessageCount         *aggmetric.AggHistogram
 	FlushHistNanos            *aggmetric.AggHistogram
 	SizeBasedFlushes          *aggmetric.AggCounter
 	CommitLatency             *aggmetric.AggHistogram
@@ -88,6 +89,8 @@ type metricsRecorder interface {
 	recordSizeBasedFlush()
 	recordParallelEmitterAdmit()
 	recordParallelEmitterEmit()
+	recordBatchingEmitterAdmit()
+	recordBatchingEmitterEmit(int)
 }
 
 var _ metricsRecorder = (*sliMetrics)(nil)
@@ -104,6 +107,7 @@ type sliMetrics struct {
 	FlushedBytes              *aggmetric.Counter
 	BatchHistNanos            *aggmetric.Histogram
 	Flushes                   *aggmetric.Counter
+	FlushMessageCount         *aggmetric.Histogram
 	FlushHistNanos            *aggmetric.Histogram
 	SizeBasedFlushes          *aggmetric.Counter
 	CommitLatency             *aggmetric.Histogram
@@ -165,6 +169,7 @@ func (m *sliMetrics) recordEmittedBatch(
 	}
 	emitNanos := timeutil.Since(startTime).Nanoseconds()
 	m.EmittedMessages.Inc(int64(numMessages))
+	m.FlushMessageCount.RecordValue(int64(numMessages))
 	m.EmittedBytes.Inc(int64(bytes))
 	if compressedBytes == sinkDoesNotCompress {
 		compressedBytes = bytes
@@ -217,6 +222,14 @@ func (m *sliMetrics) recordParallelEmitterAdmit() {
 }
 func (m *sliMetrics) recordParallelEmitterEmit() {
 	m.ParallelSinkEmitterBufferedEvents.Dec(1)
+}
+
+func (m *sliMetrics) recordBatchingEmitterAdmit() {
+	m.BatchingSinkEmitterAdmitCount.Inc(1)
+	m.BatchingSinkEmitterBufferedEvents.Inc(1)
+}
+func (m *sliMetrics) recordBatchingEmitterEmit(numFlushed int) {
+	m.BatchingSinkEmitterBufferedEvents.Dec(int64(numFlushed))
 }
 
 // getBackfillRangeCallback returns a backfillRangeCallback that is to be called
@@ -323,6 +336,14 @@ func (w *wrappingCostController) recordParallelEmitterEmit() {
 	w.inner.recordParallelEmitterEmit()
 }
 
+func (w *wrappingCostController) recordBatchingEmitterAdmit() {
+	w.inner.recordBatchingEmitterAdmit()
+}
+
+func (w *wrappingCostController) recordBatchingEmitterEmit(numFlushed int) {
+	w.inner.recordBatchingEmitterEmit(numFlushed)
+}
+
 var (
 	metaChangefeedForwardedResolvedMessages = metric.Metadata{
 		Name:        "changefeed.forwarded_resolved_messages",
@@ -426,6 +447,12 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 		Measurement: "Flushes",
 		Unit:        metric.Unit_COUNT,
 	}
+	metaChangefeedFlushMessageCount := metric.Metadata{
+		Name:        "changefeed.flush_message_count",
+		Help:        "Number of messages in each flushed batch",
+		Measurement: "Messages",
+		Unit:        metric.Unit_COUNT,
+	}
 	metaSizeBasedFlushes := metric.Metadata{
 		Name:        "changefeed.size_based_flushes",
 		Help:        "Total size based flushes across all feeds",
@@ -527,13 +554,14 @@ func newAggregateMetrics(histogramWindow time.Duration) *AggMetrics {
 	// retain significant figures of 2.
 	b := aggmetric.MakeBuilder("scope")
 	a := &AggMetrics{
-		ErrorRetries:     b.Counter(metaChangefeedErrorRetries),
-		EmittedMessages:  b.Counter(metaChangefeedEmittedMessages),
-		MessageSize:      b.Histogram(metaMessageSize, histogramWindow, metric.DataSize16MBBuckets),
-		EmittedBytes:     b.Counter(metaChangefeedEmittedBytes),
-		FlushedBytes:     b.Counter(metaChangefeedFlushedBytes),
-		Flushes:          b.Counter(metaChangefeedFlushes),
-		SizeBasedFlushes: b.Counter(metaSizeBasedFlushes),
+		ErrorRetries:      b.Counter(metaChangefeedErrorRetries),
+		EmittedMessages:   b.Counter(metaChangefeedEmittedMessages),
+		MessageSize:       b.Histogram(metaMessageSize, histogramWindow, metric.DataSize16MBBuckets),
+		EmittedBytes:      b.Counter(metaChangefeedEmittedBytes),
+		FlushedBytes:      b.Counter(metaChangefeedFlushedBytes),
+		Flushes:           b.Counter(metaChangefeedFlushes),
+		FlushMessageCount: b.Histogram(metaChangefeedFlushMessageCount, histogramWindow, metric.DataSize16MBBuckets),
+		SizeBasedFlushes:  b.Counter(metaSizeBasedFlushes),
 
 		BatchHistNanos:            b.Histogram(metaChangefeedBatchHistNanos, histogramWindow, metric.BatchProcessLatencyBuckets),
 		FlushHistNanos:            b.Histogram(metaChangefeedFlushHistNanos, histogramWindow, metric.BatchProcessLatencyBuckets),
@@ -593,6 +621,7 @@ func (a *AggMetrics) getOrCreateScope(scope string) (*sliMetrics, error) {
 		FlushedBytes:              a.FlushedBytes.AddChild(scope),
 		BatchHistNanos:            a.BatchHistNanos.AddChild(scope),
 		Flushes:                   a.Flushes.AddChild(scope),
+		FlushMessageCount:         a.FlushMessageCount.AddChild(scope),
 		FlushHistNanos:            a.FlushHistNanos.AddChild(scope),
 		SizeBasedFlushes:          a.SizeBasedFlushes.AddChild(scope),
 		CommitLatency:             a.CommitLatency.AddChild(scope),

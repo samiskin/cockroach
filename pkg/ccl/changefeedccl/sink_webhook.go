@@ -60,7 +60,7 @@ func makeWebhookSink(
 		return nil, err
 	}
 
-	flushCfg, retryOpts, err := getSinkConfigFromJson(opts.JSONConfig)
+	flushCfg, retryOpts, err := getSinkConfigFromJson(opts.JSONConfig, sinkJSONConfig{})
 	if err != nil {
 		return nil, err
 	}

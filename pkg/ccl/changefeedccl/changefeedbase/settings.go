@@ -288,3 +288,14 @@ var SinkPacerElasticCPUControlEnabled = settings.RegisterBoolSetting(
 	"determines whether changefeed sink emitting integrates with elastic CPU control",
 	true,
 )
+
+// SinkWorkers specifies the maximum number of workers to use when
+// processing  events.
+var SinkWorkers = settings.RegisterIntSetting(
+	settings.TenantWritable,
+	"changefeed.sink_workers",
+	"the number of workers to use when sending requests to the sink: <0 disables, "+
+		"0 assigns a reasonable default, >0 assigns the setting value. only affects "+
+		"webhook and pubsub sinks",
+	64,
+).WithPublic()

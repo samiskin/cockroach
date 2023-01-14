@@ -923,8 +923,9 @@ func registerCDC(r registry.Registry) {
 			// exportStatsFile := ct.startStatsCollection()
 			feed := ct.newChangefeed(feedArgs{
 				sinkType: pubsubSink,
-				targets:  []string{"tpcc.order_line"},
-				opts:     map[string]string{"initial_scan": "'only'"},
+				// sinkType: webhookSink,
+				targets: []string{"tpcc.order_line"},
+				opts:    map[string]string{"initial_scan": "'only'"},
 			})
 			// ct.runFeedLatencyVerifier(feed, latencyTargets{
 			// 	initialScanLatency: 30 * time.Minute,

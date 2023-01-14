@@ -72,6 +72,7 @@ type pubsubMessage struct {
 	alloc   kvevent.Alloc
 	message payload
 	isFlush bool
+	mvcc    hlc.Timestamp
 }
 
 type gcpPubsubClient struct {
@@ -108,7 +109,8 @@ type pubsubSink struct {
 	client     pubsubClient
 	topicNamer *TopicNamer
 
-	format changefeedbase.FormatType
+	format  changefeedbase.FormatType
+	metrics metricsRecorder
 }
 
 // TODO: unify gcp credentials code with gcp cloud storage credentials code
@@ -182,6 +184,7 @@ func MakePubsubSink(
 	u *url.URL,
 	encodingOpts changefeedbase.EncodingOptions,
 	targets changefeedbase.Targets,
+	mb metricsRecorderBuilder,
 ) (Sink, error) {
 
 	pubsubURL := sinkURL{URL: u, q: u.Query()}
@@ -211,6 +214,7 @@ func MakePubsubSink(
 		numWorkers:  numOfWorkers,
 		exitWorkers: cancel,
 		format:      formatType,
+		metrics:     mb(requiresResourceAccounting),
 	}
 
 	// creates custom pubsub object based on scheme
@@ -263,7 +267,7 @@ func (p *pubsubSink) EmitRow(
 		return err
 	}
 	m := pubsubMessage{
-		alloc: alloc, isFlush: false, message: payload{
+		alloc: alloc, isFlush: false, mvcc: mvcc, message: payload{
 			Key:   key,
 			Value: value,
 			Topic: topicName,
@@ -433,7 +437,10 @@ func (p *pubsubSink) workerLoop(workerIndex int) {
 				content = msg.message.Value
 			}
 
+			onSend := p.metrics.recordOneMessage()
 			err = p.client.sendMessage(content, msg.message.Topic, string(msg.message.Key))
+			onSend(msg.mvcc, len(content), len(content))
+
 			if err != nil {
 				p.exitWorkersWithError(err)
 			}

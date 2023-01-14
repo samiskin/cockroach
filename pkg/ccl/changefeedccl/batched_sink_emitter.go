@@ -85,6 +85,7 @@ type rowPayload struct {
 }
 
 func (bs *batchedSinkEmitter) Emit(payload rowPayload) {
+	bs.metrics.recordBatchingEmitterAdmit()
 	select {
 	case <-bs.ctx.Done():
 		return
@@ -256,6 +257,7 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) e
 				bs.handleError(err)
 			}
 
+			bs.metrics.recordBatchingEmitterEmit(batch.numMessages)
 			bs.metrics.recordEmittedBatch(
 				batch.bufferTime, batch.numMessages, batch.mvcc, batch.kvBytes, sinkDoesNotCompress)
 			batch.alloc.Release(bs.ctx)
