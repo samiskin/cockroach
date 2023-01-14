@@ -2,6 +2,7 @@ package changefeedccl
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
@@ -24,7 +25,7 @@ type batchedSinkEmitter struct {
 	successCh chan int
 	errorCh   chan error
 
-	rowCh        chan rowPayload
+	rowCh        chan *rowPayload
 	forceFlushCh chan struct{}
 
 	mu struct {
@@ -36,6 +37,28 @@ type batchedSinkEmitter struct {
 	timeSource timeutil.TimeSource
 	metrics    metricsRecorder
 	pacer      SinkPacer
+}
+
+var batchWorkerMessagePool = sync.Pool{
+	New: func() interface{} {
+		return new(batchWorkerMessage)
+	},
+}
+
+func newBatchWorkerMessage(payload SinkPayload, batch *messageBatch) *batchWorkerMessage {
+	message := batchWorkerMessagePool.Get().(*batchWorkerMessage)
+	message.sinkPayload = payload
+	message.alloc = batch.alloc
+	message.numMessages = len(batch.buffer)
+	message.mvcc = batch.mvcc
+	message.kvBytes = batch.bufferBytes
+	message.bufferTime = batch.bufferTime
+	return message
+}
+
+func freeBatchWorkerMessage(r *batchWorkerMessage) {
+	*r = batchWorkerMessage{}
+	batchWorkerMessagePool.Put(r)
 }
 
 func makeBatchedSinkEmitter(
@@ -60,7 +83,7 @@ func makeBatchedSinkEmitter(
 		successCh: successCh,
 		errorCh:   errorCh,
 
-		rowCh:        make(chan rowPayload, 64),
+		rowCh:        make(chan *rowPayload, 64),
 		forceFlushCh: make(chan struct{}, 1),
 		doneCh:       make(chan struct{}),
 		wg:           ctxgroup.WithContext(ctx),
@@ -78,15 +101,7 @@ func makeBatchedSinkEmitter(
 	return &bs
 }
 
-type rowPayload struct {
-	msg         messagePayload
-	alloc       kvevent.Alloc
-	mvcc        hlc.Timestamp
-	topic       TopicDescriptor
-	shouldFlush bool
-}
-
-func (bs *batchedSinkEmitter) Emit(payload rowPayload) {
+func (bs *batchedSinkEmitter) Emit(payload *rowPayload) {
 	bs.metrics.recordBatchingEmitterAdmit()
 	select {
 	case <-bs.ctx.Done():
@@ -99,12 +114,14 @@ func (bs *batchedSinkEmitter) Emit(payload rowPayload) {
 }
 
 func (bs *batchedSinkEmitter) Flush() {
+	flushPayload := newRowPayload()
+	flushPayload.shouldFlush = true
 	select {
 	case <-bs.ctx.Done():
 		return
 	case <-bs.doneCh:
 		return
-	case bs.rowCh <- rowPayload{shouldFlush: true}:
+	case bs.rowCh <- flushPayload:
 		return
 	}
 }
@@ -149,7 +166,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 	// Emitting a batch is a blocking I/O operation so performing it in its own
 	// goroutine allows for the next batch to be constructed and queued up in
 	// parallel.
-	batchCh := make(chan batchWorkerMessage, 64)
+	batchCh := make(chan *batchWorkerMessage, 64)
 	bs.wg.GoCtx(func(ctx context.Context) error {
 		return bs.startEmitWorker(batchCh)
 	})
@@ -176,14 +193,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 			return
 		case <-bs.doneCh:
 			return
-		case batchCh <- batchWorkerMessage{
-			sinkPayload: sinkPayload,
-			alloc:       currentBatch.alloc,
-			numMessages: len(currentBatch.buffer),
-			mvcc:        currentBatch.mvcc,
-			kvBytes:     currentBatch.bufferBytes,
-			bufferTime:  currentBatch.bufferTime,
-		}:
+		case batchCh <- newBatchWorkerMessage(sinkPayload, &currentBatch):
 			return
 		}
 	}
@@ -214,6 +224,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 				flushTimer.Reset(time.Duration(bs.batchCfg.Frequency))
 			}
 			currentBatch.Append(rowMsg, false) // TODO: Key in value
+			freeRowPayload(rowMsg)
 
 			if bs.shouldFlushBatch(currentBatch) {
 				bs.metrics.recordSizeBasedFlush()
@@ -234,10 +245,8 @@ func (bs *batchedSinkEmitter) isTerminated() bool {
 	return bs.mu.termErr != nil
 }
 
-func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) error {
+func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan *batchWorkerMessage) error {
 	for {
-		bs.pacer.Pace(bs.ctx)
-
 		select {
 		case <-bs.ctx.Done():
 			return bs.ctx.Err()
@@ -261,6 +270,7 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan batchWorkerMessage) e
 			batch.alloc.Release(bs.ctx)
 
 			bs.successCh <- batch.numMessages
+			freeBatchWorkerMessage(batch)
 			flushCallback()
 		}
 	}
@@ -307,7 +317,7 @@ func (mb *messageBatch) reset() {
 	mb.alloc = kvevent.Alloc{}
 }
 
-func (mb *messageBatch) Append(p rowPayload, keyInValue bool) {
+func (mb *messageBatch) Append(p *rowPayload, keyInValue bool) {
 	if mb.isEmpty() {
 		mb.bufferTime = timeutil.Now()
 	}

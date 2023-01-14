@@ -153,8 +153,8 @@ func makeTestingBatchEmitter(
 	}
 }
 
-func makeRowPayload(pool *testAllocPool) rowPayload {
-	return rowPayload{
+func makeRowPayload(pool *testAllocPool) *rowPayload {
+	return &rowPayload{
 		msg: messagePayload{
 			key: []byte("[1001]"),
 			val: []byte("{\"after\":{\"col1\":\"val1\",\"rowid\":1000},\"key\":[1001],\"topic:\":\"foo\"}"),

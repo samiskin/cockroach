@@ -3,6 +3,7 @@ package changefeedccl
 import (
 	"context"
 	"hash"
+	"sync"
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
@@ -17,6 +18,29 @@ type AsyncSink interface {
 	Errors() chan error
 }
 
+type rowPayload struct {
+	msg         messagePayload
+	alloc       kvevent.Alloc
+	mvcc        hlc.Timestamp
+	topic       TopicDescriptor
+	shouldFlush bool
+}
+
+var rowPayloadPool = sync.Pool{
+	New: func() interface{} {
+		return new(rowPayload)
+	},
+}
+
+func newRowPayload() *rowPayload {
+	return rowPayloadPool.Get().(*rowPayload)
+}
+
+func freeRowPayload(r *rowPayload) {
+	*r = rowPayload{}
+	rowPayloadPool.Put(r)
+}
+
 type parallelSinkEmitter struct {
 	ctx context.Context
 
@@ -28,7 +52,7 @@ type parallelSinkEmitter struct {
 
 	topicNamer *TopicNamer
 
-	workerCh   []chan rowPayload
+	workerCh   []chan *rowPayload
 	numWorkers int64
 	hasher     hash.Hash32
 
@@ -50,13 +74,15 @@ func (pse *parallelSinkEmitter) Successes() chan int {
 
 func (pse *parallelSinkEmitter) Flush(ctx context.Context) error {
 	// Tell each topic producer to flush
+	flushPayload := newRowPayload()
+	flushPayload.shouldFlush = true
 	for _, workerCh := range pse.workerCh {
 		select {
 		case <-pse.ctx.Done():
 			return pse.ctx.Err()
 		case <-pse.doneCh:
 			return nil
-		case workerCh <- rowPayload{shouldFlush: true}:
+		case workerCh <- flushPayload:
 			return nil
 		}
 	}
@@ -94,7 +120,7 @@ func makeParallelSinkEmitter(
 		successCh: make(chan int, 256),
 		errorCh:   make(chan error, 1),
 
-		workerCh:   make([]chan rowPayload, numWorkers),
+		workerCh:   make([]chan *rowPayload, numWorkers),
 		numWorkers: numWorkers,
 		hasher:     makeHasher(),
 
@@ -105,7 +131,7 @@ func makeParallelSinkEmitter(
 	}
 
 	for worker := int64(0); worker < pse.numWorkers; worker++ {
-		workerCh := make(chan rowPayload, 256)
+		workerCh := make(chan *rowPayload, 256)
 		pse.wg.GoCtx(func(ctx context.Context) error {
 			return pse.workerLoop(workerCh)
 		})
@@ -131,16 +157,16 @@ func (pse *parallelSinkEmitter) EmitRow(
 		}
 	}
 
-	payload := rowPayload{
-		msg: messagePayload{
-			key:   key,
-			val:   value,
-			topic: topicName,
-		},
-		mvcc:  mvcc,
-		alloc: alloc,
-		topic: topic,
+	payload := newRowPayload()
+	payload.msg = messagePayload{
+		key:   key,
+		val:   value,
+		topic: topicName,
 	}
+	payload.mvcc = mvcc
+	payload.alloc = alloc
+	payload.topic = topic
+
 	workerId := pse.workerIndex(payload)
 	pse.metrics.recordParallelEmitterAdmit()
 	select {
@@ -153,7 +179,7 @@ func (pse *parallelSinkEmitter) EmitRow(
 	}
 }
 
-func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
+func (pse *parallelSinkEmitter) workerLoop(input chan *rowPayload) error {
 	// Since topics usually have their own endpoints to flush to, they can each be
 	// their own batcher
 	topicEmitters := make(map[string]*batchedSinkEmitter)
@@ -199,7 +225,7 @@ func (pse *parallelSinkEmitter) workerLoop(input chan rowPayload) error {
 	}
 }
 
-func (pse *parallelSinkEmitter) workerIndex(row rowPayload) int64 {
+func (pse *parallelSinkEmitter) workerIndex(row *rowPayload) int64 {
 	pse.hasher.Reset()
 	pse.hasher.Write(row.msg.key)
 	return int64(pse.hasher.Sum32()) % pse.numWorkers
