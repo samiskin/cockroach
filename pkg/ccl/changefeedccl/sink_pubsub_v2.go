@@ -126,6 +126,7 @@ func (pe *pubsubSinkClient) EmitPayload(topic string, payload SinkPayload) error
 
 	pbMsgs := make([]*pb.PubsubMessage, len(pbPayload.messages))
 	for i, msg := range pbPayload.messages {
+		// fmt.Printf("\n\x1b[32m EMIT PAYLOAD %s \x1b[0m\n", string(msg.content))
 		pbMsgs[i] = &pb.PubsubMessage{
 			Data:        msg.content,
 			OrderingKey: "",

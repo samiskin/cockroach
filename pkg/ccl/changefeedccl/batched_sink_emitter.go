@@ -117,6 +117,7 @@ func (bs *batchedSinkEmitter) Close() error {
 }
 
 func (bs *batchedSinkEmitter) handleError(err error) {
+	// fmt.Printf("\n\x1b[35m BATCHER HANDLE ERROR %s \x1b[0m\n", err.Error())
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	if bs.mu.termErr == nil {
@@ -170,6 +171,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 			bs.handleError(err)
 			return
 		}
+		// fmt.Printf("\n\x1b[35m BATCH FLUSH %d \x1b[0m\n", len(currentBatch.buffer))
 
 		// Send the encoded batch to a separate worker so that flushes do not block
 		// further message aggregation
@@ -202,6 +204,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 				flushBatch()
 				continue
 			}
+			// fmt.Printf("\n\x1b[35m BATCH WORKER SEND \x1b[0m\n")
 			bs.metrics.recordMessageSize(int64(len(rowMsg.msg.key) + len(rowMsg.msg.val)))
 
 			// If the batch is about to no longer be empty, start the flush timer
@@ -242,6 +245,7 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan *batchWorkerMessage) 
 			}
 
 			flushCallback := bs.metrics.recordFlushRequestCallback()
+			// fmt.Printf("\n\x1b[35m BATCH EMITTER SEND %d \x1b[0m\n", batch.numMessages)
 			err := emitWithRetries(bs.ctx, bs.topic, batch.sinkPayload, batch.numMessages, bs.sc, bs.retryOpts, bs.metrics)
 			if err != nil {
 				bs.handleError(err)

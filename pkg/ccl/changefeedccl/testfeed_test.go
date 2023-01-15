@@ -174,7 +174,8 @@ func timeout() time.Duration {
 	if util.RaceEnabled {
 		return 5 * time.Minute
 	}
-	return 30 * time.Second
+	// return 30 * time.Second
+	return 5 * time.Second
 }
 
 // Partitions implements the TestFeed interface.
@@ -1963,7 +1964,7 @@ func wrapAsyncSink(
 		for {
 			select {
 			case flushed := <-sink.Successes():
-				fmt.Printf("\n\x1b[31m FLUSHED %d \x1b[0m\n", flushed)
+				// fmt.Printf("\n\x1b[32m FLUSHED %d \x1b[0m\n", flushed)
 				ss.addFlush()
 				notifySink.successCh <- flushed
 			case <-doneCh:
@@ -2335,7 +2336,7 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	ss := &sinkSynchronizer{}
 	wrapSink := func(s Sink) Sink {
 		if flushingSink, ok := s.(*flushingSink); ok {
-			if sinkClient, ok := flushingSink.client.(*pubsubSinkClient); ok {
+			if sinkClient, ok := flushingSink.emitter.client.(*pubsubSinkClient); ok {
 				_ = sinkClient.client.Close()
 				conn, _ := mockServer.Dial()
 				sinkClient.client, err = pubsub.NewPublisherClient(context.Background(), option.WithGRPCConn(conn))

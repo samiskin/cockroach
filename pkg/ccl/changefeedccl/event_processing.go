@@ -586,7 +586,7 @@ func (c *parallelEventConsumer) startWorkers(sink EventSink) error {
 		id := i
 		consumer := consumers[i]
 		workerClosure := func(ctx2 context.Context) error {
-			return c.workerLoop(ctx2, consumer, id, isAsyncSink)
+			return c.workerLoop(ctx2, consumer, id, false)
 		}
 		c.g.GoCtx(workerClosure)
 	}
@@ -606,10 +606,10 @@ func (c *parallelEventConsumer) asyncSinkWorkerLoop(
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			return c.mu.termErr
-		case flushed := <-asyncSink.Successes():
-			c.decInFlight(flushed)
-		case err := <-asyncSink.Errors():
-			return c.setWorkerError(err)
+		case <-asyncSink.Successes():
+			// c.decInFlight(flushed)
+			// case err := <-asyncSink.Errors():
+			// 	return c.setWorkerError(err)
 		}
 	}
 }
@@ -667,6 +667,7 @@ func (c *parallelEventConsumer) decInFlight(numFlushed int) {
 }
 
 func (c *parallelEventConsumer) setWorkerError(err error) error {
+	// fmt.Printf("\n\x1b[36m EVENT CONSUMER SET ERROR %s \x1b[0m\n", err.Error())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.mu.termErr == nil {
@@ -699,10 +700,10 @@ func (c *parallelEventConsumer) Flush(ctx context.Context) error {
 		return nil
 	}
 
-	// TODO: Make the sink flush itself
-	if _, ok := c.sink.(AsyncSink); ok {
-		_ = c.sink.Flush(ctx)
-	}
+	// // TODO: Make the sink flush itself
+	// if _, ok := c.sink.(AsyncSink); ok {
+	// 	_ = c.sink.Flush(ctx)
+	// }
 
 	select {
 	case <-ctx.Done():

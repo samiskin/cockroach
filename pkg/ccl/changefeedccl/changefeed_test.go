@@ -6209,16 +6209,21 @@ func TestChangefeedOrderingWithErrors(t *testing.T) {
 			http.StatusInternalServerError,
 			defaultRetryConfig().MaxRetries+1),
 			[]int{http.StatusOK, http.StatusOK, http.StatusOK}...))
-		defer closeFeed(t, foo)
+		defer func() {
+			fmt.Printf("\n\x1b[32m CLOSE FEED \x1b[0m\n")
+			closeFeed(t, foo)
+		}()
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (1, 'a')`)
 		sqlDB.Exec(t, `UPSERT INTO foo VALUES (1, 'b')`)
 		sqlDB.Exec(t, `DELETE FROM foo WHERE a = 1`)
+		fmt.Printf("\n\x1b[32m ASSERT 3 PAYLOADS \x1b[0m\n")
 		assertPayloadsPerKeyOrderedStripTs(t, foo, []string{
 			`foo: [1]->{"after": {"a": 1, "b": "a"}}`,
 			`foo: [1]->{"after": {"a": 1, "b": "b"}}`,
 			`foo: [1]->{"after": null}`,
 		})
+		fmt.Printf("\n\x1b[32m DONE ASSERT PAYLOADS \x1b[0m\n")
 
 		webhookFoo.mockSink.SetStatusCodes([]int{http.StatusInternalServerError})
 		sqlDB.Exec(t, `UPSERT INTO foo VALUES (1, 'c')`)
