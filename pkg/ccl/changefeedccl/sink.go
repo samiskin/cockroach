@@ -569,10 +569,12 @@ func (n *nullSink) Dial() error {
 }
 
 // safeSink wraps an EventSink in a mutex so it's methods are
-// thread safe.
+// thread safe. It also has a beforeFlush hook which is called
+// at the beginning of safeSink.Flush().
 type safeSink struct {
 	syncutil.Mutex
-	wrapped EventSink
+	beforeFlush func(ctx context.Context) error
+	wrapped     EventSink
 }
 
 var _ EventSink = (*safeSink)(nil)
@@ -602,6 +604,9 @@ func (s *safeSink) EmitRow(
 }
 
 func (s *safeSink) Flush(ctx context.Context) error {
+	if err := s.beforeFlush(ctx); err != nil {
+		return err
+	}
 	s.Lock()
 	defer s.Unlock()
 	return s.wrapped.Flush(ctx)

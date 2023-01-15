@@ -40,7 +40,7 @@ func makeFlushingSink(pse parallelSinkEmitter) *flushingSink {
 		g:         ctxgroup.WithContext(pse.ctx),
 	}
 	sink.g.GoCtx(func(ctx2 context.Context) error {
-		return sink.asyncSinkWorkerLoop(ctx2)
+		return sink.emitConfirmationWorker(ctx2)
 	})
 
 	return &sink
@@ -156,7 +156,7 @@ func (fs *flushingSink) Flush(ctx context.Context) error {
 	}
 }
 
-func (fs *flushingSink) asyncSinkWorkerLoop(ctx context.Context) error {
+func (fs *flushingSink) emitConfirmationWorker(ctx context.Context) error {
 	defer fmt.Printf("\n\x1b[31m EXITING WORKER LOOP \x1b[0m\n")
 	for {
 		select {
@@ -173,15 +173,7 @@ func (fs *flushingSink) asyncSinkWorkerLoop(ctx context.Context) error {
 			}
 			fs.mu.Unlock()
 		case flushed := <-fs.emitter.Successes():
-			// fmt.Printf("\n\x1b[31m SUCCESS \x1b[0m\n")
 			fs.decInFlight(flushed)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-fs.emitter.doneCh:
-				return nil
-			case fs.successCh <- flushed:
-			}
 		}
 	}
 }
@@ -215,22 +207,6 @@ func (fs *flushingSink) EmitResolvedTimestamp(
 		}
 	}
 	return nil
-}
-
-func (fs *flushingSink) Errors() chan error {
-	return fs.emitter.errorCh
-}
-
-func (fs *flushingSink) Successes() chan int {
-	return fs.successCh
-}
-
-var _ AsyncSink = (*flushingSink)(nil)
-
-type AsyncSink interface {
-	Sink
-	Successes() chan int
-	Errors() chan error
 }
 
 type rowPayload struct {
@@ -301,7 +277,7 @@ func makeParallelSinkEmitter(
 	topicNamer *TopicNamer,
 	metrics metricsRecorder,
 	pacer SinkPacer,
-) AsyncSink {
+) Sink {
 	pse := parallelSinkEmitter{
 		ctx:        ctx,
 		client:     client,

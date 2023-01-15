@@ -1912,10 +1912,7 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 	ss := &sinkSynchronizer{}
 
 	wrapSink := func(s Sink) Sink {
-		if asyncSink, ok := s.(AsyncSink); ok {
-			return wrapAsyncSink(asyncSink, &wg, done, ss)
-		}
-		return s
+		return &notifyFlushSink{Sink: s, sync: ss}
 	}
 
 	c := &webhookFeed{
@@ -1932,47 +1929,6 @@ func (f *webhookFeedFactory) Feed(create string, args ...interface{}) (cdctest.T
 		return nil, err
 	}
 	return c, nil
-}
-
-type wrappedPubsubSink struct {
-	AsyncSink
-}
-
-func (w *wrappedPubsubSink) Close() error {
-	return nil
-}
-
-type notifyFlushAsyncSink struct {
-	AsyncSink
-	successCh chan int
-}
-
-func (nas *notifyFlushAsyncSink) Successes() chan int {
-	return nas.successCh
-}
-
-func wrapAsyncSink(
-	sink AsyncSink, wg *sync.WaitGroup, doneCh chan struct{}, ss *sinkSynchronizer,
-) AsyncSink {
-	wg.Add(1)
-	notifySink := notifyFlushAsyncSink{
-		AsyncSink: sink,
-		successCh: make(chan int, 256),
-	}
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case flushed := <-sink.Successes():
-				// fmt.Printf("\n\x1b[32m FLUSHED %d \x1b[0m\n", flushed)
-				ss.addFlush()
-				notifySink.successCh <- flushed
-			case <-doneCh:
-				return
-			}
-		}
-	}()
-	return &notifySink
 }
 
 func (f *webhookFeedFactory) Server() serverutils.TestTenantInterface {
@@ -2341,7 +2297,7 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 				conn, _ := mockServer.Dial()
 				sinkClient.client, err = pubsub.NewPublisherClient(context.Background(), option.WithGRPCConn(conn))
 			}
-			return wrapAsyncSink(flushingSink, &wg, done, ss)
+			return &notifyFlushSink{Sink: s, sync: ss}
 		}
 		return s
 	}

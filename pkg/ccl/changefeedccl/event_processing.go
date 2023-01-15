@@ -48,7 +48,7 @@ type eventContext struct {
 }
 
 type eventConsumer interface {
-	ConsumeEvent(ctx context.Context, ev kvevent.Event) (bool, error)
+	ConsumeEvent(ctx context.Context, ev kvevent.Event) error
 	Close() error
 	Flush(ctx context.Context) error
 }
@@ -177,14 +177,12 @@ func newEventConsumer(
 		workerChSize: changefeedbase.EventConsumerWorkerQueueSize.Get(&cfg.Settings.SV),
 		spanFrontier: spanFrontier,
 	}
-	ss := &safeSink{wrapped: sink}
-	c.sink = ss
-
-	c.makeConsumer = func(workerId int64) (eventConsumer, error) {
+	ss := &safeSink{wrapped: sink, beforeFlush: c.Flush}
+	c.makeConsumer = func() (eventConsumer, error) {
 		return makeConsumer(ss, c)
 	}
 
-	if err := c.startWorkers(sink); err != nil {
+	if err := c.startWorkers(); err != nil {
 		return nil, nil, err
 	}
 	return c, ss, nil
@@ -286,11 +284,9 @@ func (c *kvEventToRowConsumer) topicForEvent(eventMeta cdcevent.Metadata) (Topic
 }
 
 // ConsumeEvent manages kv event lifetime: parsing, encoding and event being emitted to the sink.
-func (c *kvEventToRowConsumer) ConsumeEvent(
-	ctx context.Context, ev kvevent.Event,
-) (emitted bool, err error) {
+func (c *kvEventToRowConsumer) ConsumeEvent(ctx context.Context, ev kvevent.Event) error {
 	if ev.Type() != kvevent.TypeKV {
-		return false, errors.AssertionFailedf("expected kv ev, got %v", ev.Type())
+		return errors.AssertionFailedf("expected kv ev, got %v", ev.Type())
 	}
 
 	// Request CPU time to use for event consumption, block if this time is
@@ -316,9 +312,9 @@ func (c *kvEventToRowConsumer) ConsumeEvent(
 		// Column families are stored contiguously, so we'll get
 		// events for each one even if we're not watching them all.
 		if errors.Is(err, cdcevent.ErrUnwatchedFamily) {
-			return false, nil
+			return nil
 		}
-		return false, err
+		return err
 	}
 
 	// Get prev value, if necessary.
@@ -332,15 +328,15 @@ func (c *kvEventToRowConsumer) ConsumeEvent(
 		// Column families are stored contiguously, so we'll get
 		// events for each one even if we're not watching them all.
 		if errors.Is(err, cdcevent.ErrUnwatchedFamily) {
-			return false, nil
+			return nil
 		}
-		return false, err
+		return err
 	}
 
 	if c.evaluator != nil {
 		projection, err := c.evaluator.Eval(ctx, updatedRow, prevRow)
 		if err != nil {
-			return false, err
+			return err
 		}
 
 		if !projection.IsInitialized() {
@@ -348,7 +344,7 @@ func (c *kvEventToRowConsumer) ConsumeEvent(
 			// TODO(yevgeniy): Add metrics.
 			a := ev.DetachAlloc()
 			a.Release(ctx)
-			return false, nil
+			return nil
 		}
 
 		// Clear out prevRow.  Projection can already emit previous row; thus
@@ -365,10 +361,10 @@ func (c *kvEventToRowConsumer) encodeAndEmit(
 	prevRow cdcevent.Row,
 	schemaTS hlc.Timestamp,
 	alloc kvevent.Alloc,
-) (emitted bool, err error) {
+) error {
 	topic, err := c.topicForEvent(updatedRow.Metadata)
 	if err != nil {
-		return false, err
+		return err
 	}
 
 	// Ensure that r updates are strictly newer than the least resolved timestamp
@@ -380,7 +376,7 @@ func (c *kvEventToRowConsumer) encodeAndEmit(
 	if schemaTS.LessEq(c.frontier.Frontier()) && !schemaTS.Equal(c.cursor) {
 		log.Errorf(ctx, "cdc ux violation: detected timestamp %s that is less than "+
 			"or equal to the local frontier %s.", schemaTS, c.frontier.Frontier())
-		return false, nil
+		return nil
 	}
 
 	evCtx := eventContext{
@@ -391,33 +387,33 @@ func (c *kvEventToRowConsumer) encodeAndEmit(
 	if c.topicNamer != nil {
 		topic, err := c.topicNamer.Name(topic)
 		if err != nil {
-			return false, err
+			return err
 		}
 		evCtx.topic = topic
 	}
 
 	if c.knobs.BeforeEmitRow != nil {
 		if err := c.knobs.BeforeEmitRow(ctx); err != nil {
-			return false, err
+			return err
 		}
 	}
 
 	if c.encodingFormat == changefeedbase.OptFormatParquet {
-		return true, c.encodeForParquet(
+		return c.encodeForParquet(
 			ctx, updatedRow, prevRow, topic, schemaTS, updatedRow.MvccTimestamp, alloc,
 		)
 	}
 	var keyCopy, valueCopy []byte
 	encodedKey, err := c.encoder.EncodeKey(ctx, updatedRow)
 	if err != nil {
-		return false, err
+		return err
 	}
 	c.scratch, keyCopy = c.scratch.Copy(encodedKey, 0 /* extraCap */)
 	// TODO(yevgeniy): Some refactoring is needed in the encoder: namely, prevRow
 	// might not be available at all when working with changefeed expressions.
 	encodedValue, err := c.encoder.EncodeValue(ctx, evCtx, updatedRow, prevRow)
 	if err != nil {
-		return false, err
+		return err
 	}
 	c.scratch, valueCopy = c.scratch.Copy(encodedValue, 0 /* extraCap */)
 
@@ -428,12 +424,12 @@ func (c *kvEventToRowConsumer) encodeAndEmit(
 	if err := c.sink.EmitRow(
 		ctx, topic, keyCopy, valueCopy, schemaTS, updatedRow.MvccTimestamp, alloc,
 	); err != nil {
-		return false, err
+		return err
 	}
 	if log.V(3) {
 		log.Infof(ctx, `r %s: %s -> %s`, updatedRow.TableName, keyCopy, valueCopy)
 	}
-	return true, nil
+	return nil
 }
 
 // Close closes this consumer.
@@ -485,7 +481,7 @@ type parallelEventConsumer struct {
 
 	// makeConsumer creates a single-threaded consumer
 	// which encodes and emits events.
-	makeConsumer func(int64) (eventConsumer, error)
+	makeConsumer func() (eventConsumer, error)
 
 	// numWorkers is the number of worker threads.
 	numWorkers int64
@@ -498,8 +494,6 @@ type parallelEventConsumer struct {
 	// spanFrontier stores the frontier for the aggregator
 	// that spawned this event consumer.
 	spanFrontier *span.Frontier
-
-	sink EventSink
 
 	// termErr and termCh are used to save the first error that occurs
 	// in any worker and signal all workers to stop.
@@ -523,7 +517,7 @@ type parallelEventConsumer struct {
 
 var _ eventConsumer = (*parallelEventConsumer)(nil)
 
-func (c *parallelEventConsumer) ConsumeEvent(ctx context.Context, ev kvevent.Event) (bool, error) {
+func (c *parallelEventConsumer) ConsumeEvent(ctx context.Context, ev kvevent.Event) error {
 	startTime := timeutil.Now().UnixNano()
 	defer func() {
 		time := timeutil.Now().UnixNano()
@@ -534,14 +528,14 @@ func (c *parallelEventConsumer) ConsumeEvent(ctx context.Context, ev kvevent.Eve
 
 	select {
 	case <-ctx.Done():
-		return false, ctx.Err()
+		return ctx.Err()
 	case <-c.termCh:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		return false, c.mu.termErr
+		return c.mu.termErr
 	case c.workerCh[bucket] <- ev:
 		c.incInFlight()
-		return true, nil
+		return nil
 	}
 }
 
@@ -557,24 +551,17 @@ func (c *parallelEventConsumer) getBucketForEvent(ev kvevent.Event) int64 {
 	return int64(c.hasher.Sum32()) % c.numWorkers
 }
 
-func (c *parallelEventConsumer) startWorkers(sink EventSink) error {
+func (c *parallelEventConsumer) startWorkers() error {
 	// Create the consumers in a separate loop so that returning
 	// in case of an error is simple and does not require
 	// shutting down goroutines.
 	consumers := make([]eventConsumer, c.numWorkers)
 	for i := int64(0); i < c.numWorkers; i++ {
-		consumer, err := c.makeConsumer(i)
+		consumer, err := c.makeConsumer()
 		if err != nil {
 			return err
 		}
 		consumers[i] = consumer
-	}
-
-	asyncSink, isAsyncSink := sink.(AsyncSink)
-	if isAsyncSink {
-		c.g.GoCtx(func(ctx2 context.Context) error {
-			return c.asyncSinkWorkerLoop(ctx2, asyncSink)
-		})
 	}
 
 	for i := int64(0); i < c.numWorkers; i++ {
@@ -586,36 +573,15 @@ func (c *parallelEventConsumer) startWorkers(sink EventSink) error {
 		id := i
 		consumer := consumers[i]
 		workerClosure := func(ctx2 context.Context) error {
-			return c.workerLoop(ctx2, consumer, id, false)
+			return c.workerLoop(ctx2, consumer, id)
 		}
 		c.g.GoCtx(workerClosure)
 	}
 	return nil
 }
 
-func (c *parallelEventConsumer) asyncSinkWorkerLoop(
-	ctx context.Context, asyncSink AsyncSink,
-) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-c.doneCh:
-			return nil
-		case <-c.termCh:
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			return c.mu.termErr
-		case <-asyncSink.Successes():
-			// c.decInFlight(flushed)
-			// case err := <-asyncSink.Errors():
-			// 	return c.setWorkerError(err)
-		}
-	}
-}
-
 func (c *parallelEventConsumer) workerLoop(
-	ctx context.Context, consumer eventConsumer, id int64, asyncConfirmation bool,
+	ctx context.Context, consumer eventConsumer, id int64,
 ) error {
 	defer func() {
 		err := consumer.Close()
@@ -635,13 +601,10 @@ func (c *parallelEventConsumer) workerLoop(
 			defer c.mu.Unlock()
 			return c.mu.termErr
 		case e := <-c.workerCh[id]:
-			emitted, err := consumer.ConsumeEvent(ctx, e)
-			if err != nil {
+			if err := consumer.ConsumeEvent(ctx, e); err != nil {
 				return c.setWorkerError(err)
 			}
-			if !asyncConfirmation || !emitted {
-				c.decInFlight(1)
-			}
+			c.decInFlight()
 		}
 	}
 }
@@ -653,9 +616,9 @@ func (c *parallelEventConsumer) incInFlight() {
 	c.mu.Unlock()
 }
 
-func (c *parallelEventConsumer) decInFlight(numFlushed int) {
+func (c *parallelEventConsumer) decInFlight() {
 	c.mu.Lock()
-	c.mu.inFlight -= numFlushed
+	c.mu.inFlight--
 	notifyFlush := c.mu.waiting && c.mu.inFlight == 0
 	c.mu.Unlock()
 
@@ -667,7 +630,6 @@ func (c *parallelEventConsumer) decInFlight(numFlushed int) {
 }
 
 func (c *parallelEventConsumer) setWorkerError(err error) error {
-	// fmt.Printf("\n\x1b[36m EVENT CONSUMER SET ERROR %s \x1b[0m\n", err.Error())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.mu.termErr == nil {
@@ -700,11 +662,6 @@ func (c *parallelEventConsumer) Flush(ctx context.Context) error {
 		return nil
 	}
 
-	// // TODO: Make the sink flush itself
-	// if _, ok := c.sink.(AsyncSink); ok {
-	// 	_ = c.sink.Flush(ctx)
-	// }
-
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -732,9 +689,5 @@ func (c *parallelEventConsumer) Close() error {
 	// If an error occurred, at least one worker will return an error, so
 	// it will be returned by c.g.Wait().
 	close(c.doneCh)
-	if err := c.g.Wait(); err != nil {
-		return err
-	}
-
-	return nil
+	return c.g.Wait()
 }

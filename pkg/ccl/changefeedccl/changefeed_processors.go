@@ -281,9 +281,7 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 		return
 	}
 
-	if _, ok := ca.sink.(AsyncSink); !ok {
-		ca.sink = &errorWrapperSink{wrapped: ca.sink}
-	}
+	ca.sink = &errorWrapperSink{wrapped: ca.sink}
 
 	ca.eventConsumer, ca.sink, err = newEventConsumer(
 		ctx, ca.flowCtx.Cfg, ca.spec, feed, ca.frontier.SpanFrontier(), kvFeedHighWater,
@@ -520,8 +518,7 @@ func (ca *changeAggregator) tick() error {
 			ca.sliMetrics.AdmitLatency.RecordValue(timeutil.Since(event.Timestamp().GoTime()).Nanoseconds())
 		}
 		ca.recentKVCount++
-		_, err := ca.eventConsumer.ConsumeEvent(ca.Ctx(), event)
-		return err
+		return ca.eventConsumer.ConsumeEvent(ca.Ctx(), event)
 	case kvevent.TypeResolved:
 		a := event.DetachAlloc()
 		a.Release(ca.Ctx())
