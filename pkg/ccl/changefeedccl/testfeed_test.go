@@ -2334,13 +2334,13 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	done := make(chan struct{})
 	ss := &sinkSynchronizer{}
 	wrapSink := func(s Sink) Sink {
-		if parallelEmitter, ok := s.(*parallelSinkEmitter); ok {
-			if sinkClient, ok := parallelEmitter.client.(*pubsubSinkClient); ok {
+		if flushingSink, ok := s.(*flushingSink); ok {
+			if sinkClient, ok := flushingSink.client.(*pubsubSinkClient); ok {
 				_ = sinkClient.client.Close()
 				conn, _ := mockServer.Dial()
 				sinkClient.client, err = pubsub.NewPublisherClient(context.Background(), option.WithGRPCConn(conn))
 			}
-			return wrapAsyncSink(parallelEmitter, &wg, done, ss)
+			return wrapAsyncSink(flushingSink, &wg, done, ss)
 		}
 		return s
 	}

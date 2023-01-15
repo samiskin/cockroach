@@ -9,8 +9,72 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
+	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
+
+type flushingSink struct {
+	parallelSinkEmitter
+
+	inFlight int64
+	flushCh  chan struct{}
+	mu       struct {
+		syncutil.RWMutex
+		shouldNotify bool
+	}
+}
+
+func (fs *flushingSink) Dial() error {
+	return nil
+}
+
+func (pse *flushingSink) EmitRow(
+	ctx context.Context,
+	topic TopicDescriptor,
+	key, value []byte,
+	updated, mvcc hlc.Timestamp,
+	alloc kvevent.Alloc,
+) error {
+	var topicName string
+	var err error
+	if pse.topicNamer != nil {
+		topicName, err = pse.topicNamer.Name(topic)
+		if err != nil {
+			return err
+		}
+	}
+
+	payload := newRowPayload()
+	payload.msg = messagePayload{
+		key:   key,
+		val:   value,
+		topic: topicName,
+	}
+	payload.mvcc = mvcc
+	payload.alloc = alloc
+	payload.topic = topic
+
+	return pse.parallelSinkEmitter.Emit(payload)
+}
+
+func (pse *flushingSink) Flush(ctx context.Context) error {
+	for _, workerCh := range pse.workerCh {
+		// Each worker requires its own message in order for them not to free the
+		// message while it's being read by other workers
+		flushPayload := newRowPayload()
+		flushPayload.shouldFlush = true
+		select {
+		case <-pse.ctx.Done():
+			return pse.ctx.Err()
+		case <-pse.doneCh:
+			return nil
+		case workerCh <- flushPayload:
+		}
+	}
+	return nil
+}
+
+var _ AsyncSink = (*flushingSink)(nil)
 
 type AsyncSink interface {
 	Sink
@@ -62,8 +126,6 @@ type parallelSinkEmitter struct {
 	pacer   SinkPacer
 }
 
-var _ AsyncSink = (*parallelSinkEmitter)(nil)
-
 func (pse *parallelSinkEmitter) Errors() chan error {
 	return pse.errorCh
 }
@@ -72,32 +134,11 @@ func (pse *parallelSinkEmitter) Successes() chan int {
 	return pse.successCh
 }
 
-func (pse *parallelSinkEmitter) Flush(ctx context.Context) error {
-	// Tell each topic producer to flush
-	flushPayload := newRowPayload()
-	flushPayload.shouldFlush = true
-	for _, workerCh := range pse.workerCh {
-		select {
-		case <-pse.ctx.Done():
-			return pse.ctx.Err()
-		case <-pse.doneCh:
-			return nil
-		case workerCh <- flushPayload:
-			return nil
-		}
-	}
-	return nil
-}
-
 func (pse *parallelSinkEmitter) Close() error {
 	close(pse.doneCh)
 	_ = pse.wg.Wait()
 	pse.pacer.Close()
 	return pse.client.Close()
-}
-
-func (pse *parallelSinkEmitter) Dial() error {
-	return nil
 }
 
 func makeParallelSinkEmitter(
@@ -110,7 +151,7 @@ func makeParallelSinkEmitter(
 	metrics metricsRecorder,
 	pacer SinkPacer,
 ) AsyncSink {
-	pse := &parallelSinkEmitter{
+	pse := parallelSinkEmitter{
 		ctx:        ctx,
 		client:     client,
 		batchCfg:   config,
@@ -138,35 +179,15 @@ func makeParallelSinkEmitter(
 		pse.workerCh[worker] = workerCh
 	}
 
-	return pse
+	// TODO: Make this its own makeFlushingSink
+	sink := &flushingSink{
+		parallelSinkEmitter: pse,
+	}
+
+	return sink
 }
 
-func (pse *parallelSinkEmitter) EmitRow(
-	ctx context.Context,
-	topic TopicDescriptor,
-	key, value []byte,
-	updated, mvcc hlc.Timestamp,
-	alloc kvevent.Alloc,
-) error {
-	var topicName string
-	var err error
-	if pse.topicNamer != nil {
-		topicName, err = pse.topicNamer.Name(topic)
-		if err != nil {
-			return err
-		}
-	}
-
-	payload := newRowPayload()
-	payload.msg = messagePayload{
-		key:   key,
-		val:   value,
-		topic: topicName,
-	}
-	payload.mvcc = mvcc
-	payload.alloc = alloc
-	payload.topic = topic
-
+func (pse *parallelSinkEmitter) Emit(payload *rowPayload) error {
 	workerId := pse.workerIndex(payload)
 	pse.metrics.recordParallelEmitterAdmit()
 	select {
@@ -214,6 +235,18 @@ func (pse *parallelSinkEmitter) workerLoop(input chan *rowPayload) error {
 		case <-pse.doneCh:
 			return nil
 		case row := <-input:
+			if row.shouldFlush {
+				// Each batcher requires its own message in order for them not to free the
+				// message while it's being read by other batchers
+				freeRowPayload(row)
+				for _, emitter := range topicEmitters {
+					flushPayload := newRowPayload()
+					flushPayload.shouldFlush = true
+					emitter.Emit(flushPayload)
+				}
+				continue
+			}
+
 			emitter, ok := topicEmitters[row.msg.topic]
 			if !ok {
 				emitter = makeTopicEmitter(row.msg.topic)

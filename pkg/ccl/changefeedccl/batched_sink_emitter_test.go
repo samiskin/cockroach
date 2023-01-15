@@ -71,6 +71,12 @@ func (te *testingBatchedEmitter) EmitN(n int) {
 	}
 }
 
+func (te *testingBatchedEmitter) Flush() {
+	flushPayload := newRowPayload()
+	flushPayload.shouldFlush = true
+	te.Emit(flushPayload)
+}
+
 func (te *testingBatchedEmitter) Next() []messagePayload {
 	require.Nil(te.t, contextutil.RunWithTimeout(
 		context.Background(),

@@ -25,8 +25,7 @@ type batchedSinkEmitter struct {
 	successCh chan int
 	errorCh   chan error
 
-	rowCh        chan *rowPayload
-	forceFlushCh chan struct{}
+	rowCh chan *rowPayload
 
 	mu struct {
 		syncutil.RWMutex
@@ -83,13 +82,12 @@ func makeBatchedSinkEmitter(
 		successCh: successCh,
 		errorCh:   errorCh,
 
-		rowCh:        make(chan *rowPayload, 64),
-		forceFlushCh: make(chan struct{}, 1),
-		doneCh:       make(chan struct{}),
-		wg:           ctxgroup.WithContext(ctx),
-		timeSource:   timeSource,
-		metrics:      metrics,
-		pacer:        pacer,
+		rowCh:      make(chan *rowPayload, 64),
+		doneCh:     make(chan struct{}),
+		wg:         ctxgroup.WithContext(ctx),
+		timeSource: timeSource,
+		metrics:    metrics,
+		pacer:      pacer,
 	}
 
 	// Since flushes need to be triggerable from both EmitRow and a timer firing,
@@ -109,19 +107,6 @@ func (bs *batchedSinkEmitter) Emit(payload *rowPayload) {
 	case <-bs.doneCh:
 		return
 	case bs.rowCh <- payload:
-		return
-	}
-}
-
-func (bs *batchedSinkEmitter) Flush() {
-	flushPayload := newRowPayload()
-	flushPayload.shouldFlush = true
-	select {
-	case <-bs.ctx.Done():
-		return
-	case <-bs.doneCh:
-		return
-	case bs.rowCh <- flushPayload:
 		return
 	}
 }
@@ -212,7 +197,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 			if bs.isTerminated() {
 				continue
 			}
-			// TODO: Mkae tihs cleaner and remove forceFlushCh
+			// TODO: Mkae tihs cleaner
 			if rowMsg.shouldFlush {
 				flushBatch()
 				continue
@@ -230,8 +215,6 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 				bs.metrics.recordSizeBasedFlush()
 				flushBatch()
 			}
-		case <-bs.forceFlushCh:
-			flushBatch()
 		case <-flushTimer.Ch():
 			flushTimer.MarkRead()
 			flushBatch()
