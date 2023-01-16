@@ -135,7 +135,7 @@ func (te *testingBatchingEmitter) Empty() bool {
 }
 
 func (te *testingBatchingEmitter) Close() {
-	_ = te.batchingSinkEmitter.Close()
+	te.batchingSinkEmitter.Close()
 	_ = te.sc.Close()
 }
 

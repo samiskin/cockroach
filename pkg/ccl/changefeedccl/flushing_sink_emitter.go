@@ -55,11 +55,10 @@ func makeFlushingEmitter(ctx context.Context, wrapped AsyncEmitter) FlushingEmit
 	return &sink
 }
 
-func (fs *flushingSinkEmitter) Close() error {
-	_ = fs.wrapped.Close()
+func (fs *flushingSinkEmitter) Close() {
+	fs.wrapped.Close()
 	close(fs.doneCh)
 	_ = fs.g.Wait()
-	return nil
 }
 
 func (fs *flushingSinkEmitter) incInFlight() {

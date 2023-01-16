@@ -40,11 +40,10 @@ func (pse *parallelSinkEmitter) Successes() chan int {
 	return pse.successCh
 }
 
-func (pse *parallelSinkEmitter) Close() error {
+func (pse *parallelSinkEmitter) Close() {
 	close(pse.doneCh)
-	err := pse.wg.Wait()
+	_ = pse.wg.Wait()
 	pse.pacer.Close()
-	return err
 }
 
 type TopicEmitterFactory = func(topic string, successCh chan int, errorCh chan error) SinkEmitter
@@ -124,7 +123,7 @@ func (pse *parallelSinkEmitter) workerLoop(input chan *sinkEvent) error {
 	}
 	defer func() {
 		for _, emitter := range topicEmitters {
-			_ = emitter.Close()
+			emitter.Close()
 		}
 	}()
 

@@ -124,9 +124,7 @@ func (ps *parallelBatchingSink) Flush(ctx context.Context) error {
 }
 
 func (ps *parallelBatchingSink) Close() error {
-	if err := ps.emitter.Close(); err != nil {
-		return err
-	}
+	ps.emitter.Close()
 	return ps.client.Close()
 }
 

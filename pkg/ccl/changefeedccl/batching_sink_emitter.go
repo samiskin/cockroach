@@ -15,7 +15,7 @@ import (
 
 type SinkEmitter interface {
 	Emit(*sinkEvent)
-	Close() error
+	Close()
 }
 
 type batchingSinkEmitter struct {
@@ -123,9 +123,9 @@ func (bs *batchingSinkEmitter) Emit(payload *sinkEvent) {
 	}
 }
 
-func (bs *batchingSinkEmitter) Close() error {
+func (bs *batchingSinkEmitter) Close() {
 	close(bs.doneCh)
-	return bs.wg.Wait()
+	_ = bs.wg.Wait()
 }
 
 func (bs *batchingSinkEmitter) handleError(err error) {
