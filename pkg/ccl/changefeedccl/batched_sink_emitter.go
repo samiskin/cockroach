@@ -25,7 +25,7 @@ type batchedSinkEmitter struct {
 	successCh chan int
 	errorCh   chan error
 
-	rowCh chan *rowPayload
+	rowCh chan *sinkEvent
 
 	mu struct {
 		syncutil.RWMutex
@@ -82,7 +82,7 @@ func makeBatchedSinkEmitter(
 		successCh: successCh,
 		errorCh:   errorCh,
 
-		rowCh:      make(chan *rowPayload, 64),
+		rowCh:      make(chan *sinkEvent, 64),
 		doneCh:     make(chan struct{}),
 		wg:         ctxgroup.WithContext(ctx),
 		timeSource: timeSource,
@@ -99,7 +99,7 @@ func makeBatchedSinkEmitter(
 	return &bs
 }
 
-func (bs *batchedSinkEmitter) Emit(payload *rowPayload) {
+func (bs *batchedSinkEmitter) Emit(payload *sinkEvent) {
 	bs.metrics.recordBatchingEmitterAdmit()
 	select {
 	case <-bs.ctx.Done():
@@ -195,24 +195,31 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 			return bs.ctx.Err()
 		case <-bs.doneCh:
 			return nil
-		case rowMsg := <-bs.rowCh:
+		case sinkEvent := <-bs.rowCh:
+			defer freeSinkEvent(sinkEvent)
+
 			if bs.isTerminated() {
 				continue
 			}
-			// TODO: Mkae tihs cleaner
-			if rowMsg.shouldFlush {
+			if sinkEvent.shouldFlush {
 				flushBatch()
 				continue
 			}
+			// Resolved messages aren't batched with normal messages
+			if sinkEvent.resolved != nil {
+				flushBatch()
+				bs.emitResolvedEvent(sinkEvent.resolved.body)
+				continue
+			}
+
 			// fmt.Printf("\n\x1b[35m BATCH WORKER SEND \x1b[0m\n")
-			bs.metrics.recordMessageSize(int64(len(rowMsg.msg.key) + len(rowMsg.msg.val)))
+			bs.metrics.recordMessageSize(int64(len(sinkEvent.msg.key) + len(sinkEvent.msg.val)))
 
 			// If the batch is about to no longer be empty, start the flush timer
 			if currentBatch.isEmpty() && time.Duration(bs.batchCfg.Frequency) > 0 {
 				flushTimer.Reset(time.Duration(bs.batchCfg.Frequency))
 			}
-			currentBatch.Append(rowMsg, false) // TODO: Key in value
-			freeRowPayload(rowMsg)
+			currentBatch.AppendKV(sinkEvent, false) // TODO: Key in value
 
 			if bs.shouldFlushBatch(currentBatch) {
 				bs.metrics.recordSizeBasedFlush()
@@ -222,6 +229,23 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 			flushTimer.MarkRead()
 			flushBatch()
 		}
+	}
+}
+
+func (bs *batchedSinkEmitter) emitResolvedEvent(resolvedBody []byte) {
+	payload, err := bs.sc.EncodeResolvedMessage(resolvedMessagePayload{
+		body:  resolvedBody,
+		topic: bs.topic,
+	})
+	if err != nil {
+		bs.handleError(err)
+		return
+	}
+
+	err = emitWithRetries(bs.ctx, bs.topic, payload, 1, bs.sc, bs.retryOpts, bs.metrics)
+	if err != nil {
+		bs.handleError(err)
+		return
 	}
 }
 
@@ -249,6 +273,7 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan *batchWorkerMessage) 
 			err := emitWithRetries(bs.ctx, bs.topic, batch.sinkPayload, batch.numMessages, bs.sc, bs.retryOpts, bs.metrics)
 			if err != nil {
 				bs.handleError(err)
+				return nil
 			}
 
 			bs.metrics.recordBatchingEmitterEmit(batch.numMessages)
@@ -304,7 +329,7 @@ func (mb *messageBatch) reset() {
 	mb.alloc = kvevent.Alloc{}
 }
 
-func (mb *messageBatch) Append(p *rowPayload, keyInValue bool) {
+func (mb *messageBatch) AppendKV(p *sinkEvent, keyInValue bool) {
 	if mb.isEmpty() {
 		mb.bufferTime = timeutil.Now()
 	}

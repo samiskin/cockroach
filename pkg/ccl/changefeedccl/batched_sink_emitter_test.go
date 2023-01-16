@@ -67,12 +67,12 @@ type testingBatchedEmitter struct {
 
 func (te *testingBatchedEmitter) EmitN(n int) {
 	for i := 0; i < n; i++ {
-		te.Emit(makeRowPayload(&te.pool))
+		te.Emit(makeSinkEvent(&te.pool))
 	}
 }
 
 func (te *testingBatchedEmitter) Flush() {
-	flushPayload := newRowPayload()
+	flushPayload := newSinkEvent()
 	flushPayload.shouldFlush = true
 	te.Emit(flushPayload)
 }
@@ -163,8 +163,8 @@ func makeTestingBatchEmitter(
 	}
 }
 
-func makeRowPayload(pool *testAllocPool) *rowPayload {
-	return &rowPayload{
+func makeSinkEvent(pool *testAllocPool) *sinkEvent {
+	return &sinkEvent{
 		msg: messagePayload{
 			key: []byte("[1001]"),
 			val: []byte("{\"after\":{\"col1\":\"val1\",\"rowid\":1000},\"key\":[1001],\"topic:\":\"foo\"}"),
@@ -213,7 +213,7 @@ func TestBatchedSinkEmitterMessageLimit(t *testing.T) {
 func TestBatchedSinkEmitterSizeFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
-	row := makeRowPayload(&testAllocPool{})
+	row := makeSinkEvent(&testAllocPool{})
 	rowSize := len(row.msg.key) + len(row.msg.val)
 
 	emitter := makeTestingBatchEmitter(
@@ -266,6 +266,7 @@ func TestBatchedSinkEmitterTimedFlush(t *testing.T) {
 
 	// Should emit after the time has passed
 	mt.Advance(30 * time.Minute)
+	// TODO Fails under race, expected 3 but got 1
 	require.Equal(t, 3, len(emitter.Next()))
 
 	// More time shouldn't cause anything to be emitted

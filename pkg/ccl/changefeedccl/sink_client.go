@@ -3,7 +3,6 @@ package changefeedccl
 import (
 	"context"
 
-	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 )
 
@@ -22,7 +21,8 @@ type SinkClient interface {
 // batch of messages that is ready to be emitted by its EmitRow method.
 type SinkPayload interface{}
 
-// messagePayload represents a KV event to be emitted.
+// messagePayload represents either a KV, where key and val are set, or a
+// resolved message, where resolvedBody is set
 type messagePayload struct {
 	key   []byte
 	val   []byte
@@ -31,9 +31,8 @@ type messagePayload struct {
 
 // resolvedMessagePayload represents a Resolved event to be emitted.
 type resolvedMessagePayload struct {
-	body       []byte
-	resolvedTs hlc.Timestamp
-	topic      string
+	body  []byte
+	topic string
 }
 
 func emitWithRetries(

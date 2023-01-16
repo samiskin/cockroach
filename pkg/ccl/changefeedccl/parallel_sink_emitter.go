@@ -16,8 +16,7 @@ import (
 )
 
 type flushingSink struct {
-	emitter   parallelSinkEmitter
-	successCh chan int
+	emitter parallelSinkEmitter
 
 	inFlight int64
 	flushCh  chan struct{}
@@ -32,12 +31,11 @@ type flushingSink struct {
 
 func makeFlushingSink(pse parallelSinkEmitter) *flushingSink {
 	sink := flushingSink{
-		emitter:   pse,
-		successCh: make(chan int, 256),
-		inFlight:  0,
-		flushCh:   make(chan struct{}, 1),
-		termCh:    make(chan struct{}, 1),
-		g:         ctxgroup.WithContext(pse.ctx),
+		emitter:  pse,
+		inFlight: 0,
+		flushCh:  make(chan struct{}, 1),
+		termCh:   make(chan struct{}, 1),
+		g:        ctxgroup.WithContext(pse.ctx),
 	}
 	sink.g.GoCtx(func(ctx2 context.Context) error {
 		return sink.emitConfirmationWorker(ctx2)
@@ -94,7 +92,7 @@ func (fs *flushingSink) EmitRow(
 		}
 	}
 
-	payload := newRowPayload()
+	payload := newSinkEvent()
 	payload.msg = messagePayload{
 		key:   key,
 		val:   value,
@@ -102,7 +100,6 @@ func (fs *flushingSink) EmitRow(
 	}
 	payload.mvcc = mvcc
 	payload.alloc = alloc
-	payload.topic = topic
 
 	fs.incInFlight()
 	fs.emitter.Emit(payload)
@@ -122,7 +119,7 @@ func (fs *flushingSink) Flush(ctx context.Context) error {
 	fs.mu.Unlock()
 
 	// fmt.Printf("\n\x1b[31m SENDING FLUSH \x1b[0m\n")
-	flushPayload := newRowPayload()
+	flushPayload := newSinkEvent()
 	flushPayload.shouldFlush = true
 	fs.emitter.Emit(flushPayload)
 
@@ -183,43 +180,42 @@ func (fs *flushingSink) EmitResolvedTimestamp(
 		topics = fs.emitter.topicNamer.DisplayNamesSlice()
 	}
 	for _, topic := range topics {
-		payload, err := fs.emitter.client.EncodeResolvedMessage(resolvedMessagePayload{
-			resolvedTs: resolved,
-			body:       data,
-			topic:      topic,
-		})
-		if err != nil {
-			return err
+		event := newSinkEvent()
+		event.resolved = &resolvedMessagePayload{
+			body:  data,
+			topic: topic,
 		}
-		err = emitWithRetries(fs.emitter.ctx, topic, payload, 1, fs.emitter.client, fs.emitter.retryOpts, fs.emitter.metrics)
-		if err != nil {
-			return err
-		}
+		fs.emitter.Emit(event)
 	}
-	return nil
+	return fs.Flush(ctx)
 }
 
-type rowPayload struct {
-	msg         messagePayload
-	alloc       kvevent.Alloc
-	mvcc        hlc.Timestamp
-	topic       TopicDescriptor
+type sinkEvent struct {
+	// Set if its a Flush event
 	shouldFlush bool
+
+	// Set if its a Resolved event
+	resolved *resolvedMessagePayload
+
+	// Set if its a KV Event
+	msg   messagePayload
+	alloc kvevent.Alloc
+	mvcc  hlc.Timestamp
 }
 
-var rowPayloadPool = sync.Pool{
+var sinkEventPool = sync.Pool{
 	New: func() interface{} {
-		return new(rowPayload)
+		return new(sinkEvent)
 	},
 }
 
-func newRowPayload() *rowPayload {
-	return rowPayloadPool.Get().(*rowPayload)
+func newSinkEvent() *sinkEvent {
+	return sinkEventPool.Get().(*sinkEvent)
 }
 
-func freeRowPayload(r *rowPayload) {
-	*r = rowPayload{}
-	rowPayloadPool.Put(r)
+func freeSinkEvent(r *sinkEvent) {
+	*r = sinkEvent{}
+	sinkEventPool.Put(r)
 }
 
 type parallelSinkEmitter struct {
@@ -233,7 +229,7 @@ type parallelSinkEmitter struct {
 
 	topicNamer *TopicNamer
 
-	workerCh   []chan *rowPayload
+	workerCh   []chan *sinkEvent
 	numWorkers int64
 	hasher     hash.Hash32
 
@@ -278,7 +274,7 @@ func makeParallelSinkEmitter(
 		successCh: make(chan int, 256),
 		errorCh:   make(chan error, 1),
 
-		workerCh:   make([]chan *rowPayload, numWorkers),
+		workerCh:   make([]chan *sinkEvent, numWorkers),
 		numWorkers: numWorkers,
 		hasher:     makeHasher(),
 
@@ -289,7 +285,7 @@ func makeParallelSinkEmitter(
 	}
 
 	for worker := int64(0); worker < pse.numWorkers; worker++ {
-		workerCh := make(chan *rowPayload, 256)
+		workerCh := make(chan *sinkEvent, 256)
 		pse.wg.GoCtx(func(ctx context.Context) error {
 			return pse.workerLoop(workerCh)
 		})
@@ -300,14 +296,14 @@ func makeParallelSinkEmitter(
 	return makeFlushingSink(pse)
 }
 
-func (pse *parallelSinkEmitter) Emit(payload *rowPayload) {
+func (pse *parallelSinkEmitter) Emit(payload *sinkEvent) {
 	if payload.shouldFlush {
 		// fmt.Printf("\n\x1b[34m PARALLEL EMITTER FLUSH \x1b[0m\n")
-		freeRowPayload(payload)
+		freeSinkEvent(payload)
 		for _, workerCh := range pse.workerCh {
 			// Each worker requires its own message in order for them not to free the
 			// message while it's being read by other workers
-			flushPayload := newRowPayload()
+			flushPayload := newSinkEvent()
 			flushPayload.shouldFlush = true
 			select {
 			case <-pse.ctx.Done():
@@ -333,7 +329,7 @@ func (pse *parallelSinkEmitter) Emit(payload *rowPayload) {
 	}
 }
 
-func (pse *parallelSinkEmitter) workerLoop(input chan *rowPayload) error {
+func (pse *parallelSinkEmitter) workerLoop(input chan *sinkEvent) error {
 	// Since topics usually have their own endpoints to flush to, they can each be
 	// their own batcher
 	topicEmitters := make(map[string]*batchedSinkEmitter)
@@ -371,9 +367,9 @@ func (pse *parallelSinkEmitter) workerLoop(input chan *rowPayload) error {
 			if row.shouldFlush {
 				// Each batcher requires its own message in order for them not to free the
 				// message while it's being read by other batchers
-				freeRowPayload(row)
+				freeSinkEvent(row)
 				for _, emitter := range topicEmitters {
-					flushPayload := newRowPayload()
+					flushPayload := newSinkEvent()
 					flushPayload.shouldFlush = true
 					emitter.Emit(flushPayload)
 				}
@@ -392,7 +388,7 @@ func (pse *parallelSinkEmitter) workerLoop(input chan *rowPayload) error {
 	}
 }
 
-func (pse *parallelSinkEmitter) workerIndex(row *rowPayload) int64 {
+func (pse *parallelSinkEmitter) workerIndex(row *sinkEvent) int64 {
 	pse.hasher.Reset()
 	pse.hasher.Write(row.msg.key)
 	return int64(pse.hasher.Sum32()) % pse.numWorkers
