@@ -227,7 +227,7 @@ func (bs *batchingSinkEmitter) startBatchWorker() error {
 			if currentBatch.isEmpty() && time.Duration(bs.batchCfg.Frequency) > 0 {
 				flushTimer.Reset(time.Duration(bs.batchCfg.Frequency))
 			}
-			currentBatch.Append(sinkEvent, false) // TODO: Key in value
+			currentBatch.Append(sinkEvent)
 
 			if bs.shouldFlushBatch(currentBatch) {
 				bs.metrics.recordSizeBasedFlush()
@@ -337,19 +337,14 @@ func (mb *messageBatch) reset() {
 	mb.alloc = kvevent.Alloc{}
 }
 
-func (mb *messageBatch) Append(p *sinkEvent, keyNotEmitted bool) {
+func (mb *messageBatch) Append(p *sinkEvent) {
 	if mb.isEmpty() {
 		mb.bufferTime = timeutil.Now()
 	}
 
 	mb.buffer = append(mb.buffer, p.msg)
 	mb.bufferBytes += len(p.msg.val)
-
-	// Some sinks (ex: webhook) include the key in the value and only emit the
-	// value, therefore in those cases the bytes of the key shouldn't be counted
-	if !keyNotEmitted {
-		mb.bufferBytes += len(p.msg.key)
-	}
+	mb.bufferBytes += len(p.msg.key)
 
 	if mb.mvcc.IsEmpty() || p.mvcc.Less(mb.mvcc) {
 		mb.mvcc = p.mvcc

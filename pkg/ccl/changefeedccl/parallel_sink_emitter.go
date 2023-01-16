@@ -7,7 +7,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 )
 
-type AsyncSinkEmitter interface {
+type AsyncEmitter interface {
 	SinkEmitter
 	Successes() chan int
 	Errors() chan error
@@ -30,7 +30,7 @@ type parallelSinkEmitter struct {
 	pacer   SinkPacer
 }
 
-var _ AsyncSinkEmitter = (*parallelSinkEmitter)(nil)
+var _ AsyncEmitter = (*parallelSinkEmitter)(nil)
 
 func (pse *parallelSinkEmitter) Errors() chan error {
 	return pse.errorCh
@@ -55,7 +55,7 @@ func makeParallelSinkEmitter(
 	numWorkers int64,
 	metrics metricsRecorder,
 	pacer SinkPacer,
-) AsyncSinkEmitter {
+) AsyncEmitter {
 	pse := parallelSinkEmitter{
 		ctx:                 ctx,
 		topicEmitterFactory: topicEmitterFactory,

@@ -133,16 +133,18 @@ func makeWebhookSinkClient(
 }
 
 func makeWebhookClient(u sinkURL, timeout time.Duration) (*httputil.Client, error) {
+	defaultTransport := http.DefaultTransport.(*http.Transport)
 	client := &httputil.Client{
 		Client: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
-				DialContext:     (&net.Dialer{Timeout: timeout}).DialContext,
-				IdleConnTimeout: 90 * time.Second, // taken from DefaultTransport
+				DialContext:         (&net.Dialer{Timeout: timeout}).DialContext,
+				IdleConnTimeout:     defaultTransport.IdleConnTimeout,
+				TLSHandshakeTimeout: defaultTransport.TLSHandshakeTimeout,
 
-				// Raising this value to 200 makes little difference while reducing it
-				// to 50 results in an ~8% reduction in throughput.
-				MaxIdleConnsPerHost: 100,
+				// Since all conns are likely to the same host, allow all idle conns to
+				// be used for it.
+				MaxIdleConnsPerHost: defaultTransport.MaxIdleConns,
 			},
 		},
 	}

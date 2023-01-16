@@ -9,15 +9,14 @@ import (
 )
 
 type FlushingEmitter interface {
-	Emit(*sinkEvent)
+	SinkEmitter
 	// Flush is expected to never be called while Emit() is able to be invoked
 	Flush() error
-	Close() error
 }
 
 type flushingSinkEmitter struct {
 	ctx     context.Context
-	wrapped AsyncSinkEmitter
+	wrapped AsyncEmitter
 
 	inFlight int64
 	flushCh  chan struct{}
@@ -39,7 +38,7 @@ func (fs *flushingSinkEmitter) Emit(event *sinkEvent) {
 	fs.wrapped.Emit(event)
 }
 
-func makeFlushingEmitter(ctx context.Context, wrapped AsyncSinkEmitter) FlushingEmitter {
+func makeFlushingEmitter(ctx context.Context, wrapped AsyncEmitter) FlushingEmitter {
 	sink := flushingSinkEmitter{
 		ctx:      ctx,
 		wrapped:  wrapped,
