@@ -286,7 +286,7 @@ func makePubsubSink(
 		return nil, err
 	}
 
-	return makeParallelSinkEmitter(
+	return makeParallelBatchingSink(
 		ctx,
 		sinkClient,
 		flushCfg,

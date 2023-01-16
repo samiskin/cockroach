@@ -59,28 +59,26 @@ func (tc *testingSinkClient) EmitPayload(topic string, payload SinkPayload) erro
 	return nil
 }
 
-type testingBatchedEmitter struct {
-	batchedSinkEmitter
+type testingBatchingEmitter struct {
+	batchingSinkEmitter
 	t    *testing.T
 	pool testAllocPool
 }
 
-func (te *testingBatchedEmitter) EmitN(n int) {
+func (te *testingBatchingEmitter) EmitN(n int) {
 	for i := 0; i < n; i++ {
 		te.Emit(makeSinkEvent(&te.pool))
 	}
 }
 
-func (te *testingBatchedEmitter) Flush() {
-	flushPayload := newSinkEvent()
-	flushPayload.shouldFlush = true
-	te.Emit(flushPayload)
+func (te *testingBatchingEmitter) Flush() {
+	te.Emit(newSinkFlushEvent())
 }
 
-func (te *testingBatchedEmitter) Next() []messagePayload {
+func (te *testingBatchingEmitter) Next() []messagePayload {
 	require.Nil(te.t, contextutil.RunWithTimeout(
 		context.Background(),
-		"testingBatchedEmitter.Next",
+		"testingBatchingEmitter.Next",
 		timeout(),
 		func(ctx context.Context) error {
 			select {
@@ -99,10 +97,10 @@ func (te *testingBatchedEmitter) Next() []messagePayload {
 	return next
 }
 
-func (te *testingBatchedEmitter) ExpectErr() {
+func (te *testingBatchingEmitter) ExpectErr() {
 	require.Nil(te.t, contextutil.RunWithTimeout(
 		context.Background(),
-		"testingBatchedEmitter.ExpectErr",
+		"testingBatchingEmitter.ExpectErr",
 		timeout(),
 		func(ctx context.Context) error {
 			select {
@@ -115,44 +113,44 @@ func (te *testingBatchedEmitter) ExpectErr() {
 	))
 }
 
-func (te *testingBatchedEmitter) InjectEmitError(errorCount int) {
+func (te *testingBatchingEmitter) InjectEmitError(errorCount int) {
 	tc := te.sc.(*testingSinkClient)
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	tc.mu.pendingEmitErrors += errorCount
 }
 
-func (te *testingBatchedEmitter) InjectEncodeError(errorCount int) {
+func (te *testingBatchingEmitter) InjectEncodeError(errorCount int) {
 	tc := te.sc.(*testingSinkClient)
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	tc.mu.pendingEncodeErrors += errorCount
 }
 
-func (te *testingBatchedEmitter) Empty() bool {
+func (te *testingBatchingEmitter) Empty() bool {
 	tc := te.sc.(*testingSinkClient)
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
 	return len(tc.emittedBatches) == 0
 }
 
-func (te *testingBatchedEmitter) Close() {
-	_ = te.batchedSinkEmitter.Close()
+func (te *testingBatchingEmitter) Close() {
+	_ = te.batchingSinkEmitter.Close()
 	_ = te.sc.Close()
 }
 
 func makeTestingBatchEmitter(
 	t *testing.T, config sinkBatchConfig, timeSource timeutil.TimeSource,
-) testingBatchedEmitter {
-	return testingBatchedEmitter{
-		batchedSinkEmitter: *makeBatchedSinkEmitter(
+) testingBatchingEmitter {
+	return testingBatchingEmitter{
+		batchingSinkEmitter: *makeBatchingSinkEmitter(
 			context.Background(),
-			"test",
 			&testingSinkClient{
 				emittedBatches: make([][]messagePayload, 0),
 			},
 			config,
 			retry.Options{},
+			"test",
 			make(chan int, 256),
 			make(chan error, 1),
 			timeSource,
@@ -174,7 +172,7 @@ func makeSinkEvent(pool *testAllocPool) *sinkEvent {
 	}
 }
 
-func TestBatchedSinkEmitterMessageLimit(t *testing.T) {
+func TestBatchingSinkEmitterMessageLimit(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	// Default is flush every time
@@ -210,7 +208,7 @@ func TestBatchedSinkEmitterMessageLimit(t *testing.T) {
 	require.EqualValues(t, 0, emitter.pool.used())
 }
 
-func TestBatchedSinkEmitterSizeFlush(t *testing.T) {
+func TestBatchingSinkEmitterSizeFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	row := makeSinkEvent(&testAllocPool{})
@@ -236,7 +234,7 @@ func TestBatchedSinkEmitterSizeFlush(t *testing.T) {
 	require.Equal(t, 3, len(emitter.Next()))
 }
 
-func TestBatchedSinkEmitterTimedFlush(t *testing.T) {
+func TestBatchingSinkEmitterTimedFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	mt := timeutil.NewManualTime(timeutil.Now())
@@ -283,7 +281,7 @@ func TestBatchedSinkEmitterTimedFlush(t *testing.T) {
 	require.Equal(t, 1, len(emitter.Next()))
 }
 
-func TestBatchedSinkEmitterError(t *testing.T) {
+func TestBatchingSinkEmitterError(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	emitter := makeTestingBatchEmitter(t, sinkBatchConfig{
@@ -317,7 +315,7 @@ func TestBatchedSinkEmitterError(t *testing.T) {
 	emitter.Close()
 }
 
-func TestBatchedSinkEmitterForceFlush(t *testing.T) {
+func TestBatchingSinkEmitterForceFlush(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 
 	emitter := makeTestingBatchEmitter(t, sinkBatchConfig{

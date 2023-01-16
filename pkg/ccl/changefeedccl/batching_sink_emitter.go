@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/changefeedbase"
 	"github.com/cockroachdb/cockroach/pkg/ccl/changefeedccl/kvevent"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -14,7 +13,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 )
 
-type batchedSinkEmitter struct {
+type SinkEmitter interface {
+	Emit(*sinkEvent)
+	Close() error
+}
+
+type batchingSinkEmitter struct {
 	ctx   context.Context
 	sc    SinkClient
 	topic string
@@ -36,6 +40,53 @@ type batchedSinkEmitter struct {
 	timeSource timeutil.TimeSource
 	metrics    metricsRecorder
 	pacer      SinkPacer
+}
+
+var _ SinkEmitter = (*batchingSinkEmitter)(nil)
+
+func makeBatchingSinkEmitter(
+	ctx context.Context,
+	sink SinkClient,
+	config sinkBatchConfig,
+	retryOpts retry.Options,
+	topic string,
+	successCh chan int,
+	errorCh chan error,
+	timeSource timeutil.TimeSource,
+	metrics metricsRecorder,
+	pacer SinkPacer,
+) *batchingSinkEmitter {
+	bs := batchingSinkEmitter{
+		ctx:       ctx,
+		sc:        sink,
+		topic:     topic,
+		batchCfg:  config,
+		retryOpts: retryOpts,
+
+		successCh: successCh,
+		errorCh:   errorCh,
+
+		rowCh:      make(chan *sinkEvent, 64),
+		doneCh:     make(chan struct{}),
+		wg:         ctxgroup.WithContext(ctx),
+		timeSource: timeSource,
+		metrics:    metrics,
+		pacer:      pacer,
+	}
+
+	bs.wg.GoCtx(func(ctx context.Context) error {
+		return bs.startBatchWorker()
+	})
+
+	return &bs
+}
+
+func (bse *batchingSinkEmitter) Errors() chan error {
+	return bse.errorCh
+}
+
+func (bse *batchingSinkEmitter) Successes() chan int {
+	return bse.successCh
 }
 
 var batchWorkerMessagePool = sync.Pool{
@@ -60,46 +111,7 @@ func freeBatchWorkerMessage(r *batchWorkerMessage) {
 	batchWorkerMessagePool.Put(r)
 }
 
-func makeBatchedSinkEmitter(
-	ctx context.Context,
-	topic string,
-	sink SinkClient,
-	config sinkBatchConfig,
-	retryOpts retry.Options,
-	successCh chan int,
-	errorCh chan error,
-	timeSource timeutil.TimeSource,
-	metrics metricsRecorder,
-	pacer SinkPacer,
-) *batchedSinkEmitter {
-	bs := batchedSinkEmitter{
-		ctx:       ctx,
-		sc:        sink,
-		topic:     topic,
-		batchCfg:  config,
-		retryOpts: retryOpts,
-
-		successCh: successCh,
-		errorCh:   errorCh,
-
-		rowCh:      make(chan *sinkEvent, 64),
-		doneCh:     make(chan struct{}),
-		wg:         ctxgroup.WithContext(ctx),
-		timeSource: timeSource,
-		metrics:    metrics,
-		pacer:      pacer,
-	}
-
-	// Since flushes need to be triggerable from both EmitRow and a timer firing,
-	// they must be done in a dedicated goroutine.
-	bs.wg.GoCtx(func(ctx context.Context) error {
-		return bs.startBatchWorker()
-	})
-
-	return &bs
-}
-
-func (bs *batchedSinkEmitter) Emit(payload *sinkEvent) {
+func (bs *batchingSinkEmitter) Emit(payload *sinkEvent) {
 	bs.metrics.recordBatchingEmitterAdmit()
 	select {
 	case <-bs.ctx.Done():
@@ -111,18 +123,16 @@ func (bs *batchedSinkEmitter) Emit(payload *sinkEvent) {
 	}
 }
 
-func (bs *batchedSinkEmitter) Close() error {
+func (bs *batchingSinkEmitter) Close() error {
 	close(bs.doneCh)
 	return bs.wg.Wait()
 }
 
-func (bs *batchedSinkEmitter) handleError(err error) {
-	// fmt.Printf("\n\x1b[35m BATCHER HANDLE ERROR %s \x1b[0m\n", err.Error())
+func (bs *batchingSinkEmitter) handleError(err error) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	if bs.mu.termErr == nil {
-		// TODO: Move this retryable somewhere else
-		bs.mu.termErr = changefeedbase.MarkRetryableError(err)
+		bs.mu.termErr = err
 	} else {
 		return
 	}
@@ -146,7 +156,7 @@ type batchWorkerMessage struct {
 	bufferTime  time.Time
 }
 
-func (bs *batchedSinkEmitter) startBatchWorker() error {
+func (bs *batchingSinkEmitter) startBatchWorker() error {
 	currentBatch := newMessageBatch()
 
 	// Emitting a batch is a blocking I/O operation so performing it in its own
@@ -171,7 +181,6 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 			bs.handleError(err)
 			return
 		}
-		// fmt.Printf("\n\x1b[35m BATCH FLUSH %d \x1b[0m\n", len(currentBatch.buffer))
 
 		// Send the encoded batch to a separate worker so that flushes do not block
 		// further message aggregation
@@ -212,14 +221,13 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 				continue
 			}
 
-			// fmt.Printf("\n\x1b[35m BATCH WORKER SEND \x1b[0m\n")
 			bs.metrics.recordMessageSize(int64(len(sinkEvent.msg.key) + len(sinkEvent.msg.val)))
 
 			// If the batch is about to no longer be empty, start the flush timer
 			if currentBatch.isEmpty() && time.Duration(bs.batchCfg.Frequency) > 0 {
 				flushTimer.Reset(time.Duration(bs.batchCfg.Frequency))
 			}
-			currentBatch.AppendKV(sinkEvent, false) // TODO: Key in value
+			currentBatch.Append(sinkEvent, false) // TODO: Key in value
 
 			if bs.shouldFlushBatch(currentBatch) {
 				bs.metrics.recordSizeBasedFlush()
@@ -232,7 +240,7 @@ func (bs *batchedSinkEmitter) startBatchWorker() error {
 	}
 }
 
-func (bs *batchedSinkEmitter) emitResolvedEvent(resolvedBody []byte) {
+func (bs *batchingSinkEmitter) emitResolvedEvent(resolvedBody []byte) {
 	payload, err := bs.sc.EncodeResolvedMessage(resolvedMessagePayload{
 		body:  resolvedBody,
 		topic: bs.topic,
@@ -247,15 +255,16 @@ func (bs *batchedSinkEmitter) emitResolvedEvent(resolvedBody []byte) {
 		bs.handleError(err)
 		return
 	}
+	bs.successCh <- 1
 }
 
-func (bs *batchedSinkEmitter) isTerminated() bool {
+func (bs *batchingSinkEmitter) isTerminated() bool {
 	bs.mu.RLock()
 	defer bs.mu.RUnlock()
 	return bs.mu.termErr != nil
 }
 
-func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan *batchWorkerMessage) error {
+func (bs *batchingSinkEmitter) startEmitWorker(batchCh chan *batchWorkerMessage) error {
 	for {
 		select {
 		case <-bs.ctx.Done():
@@ -269,7 +278,6 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan *batchWorkerMessage) 
 			}
 
 			flushCallback := bs.metrics.recordFlushRequestCallback()
-			// fmt.Printf("\n\x1b[35m BATCH EMITTER SEND %d \x1b[0m\n", batch.numMessages)
 			err := emitWithRetries(bs.ctx, bs.topic, batch.sinkPayload, batch.numMessages, bs.sc, bs.retryOpts, bs.metrics)
 			if err != nil {
 				bs.handleError(err)
@@ -288,7 +296,7 @@ func (bs *batchedSinkEmitter) startEmitWorker(batchCh chan *batchWorkerMessage) 
 	}
 }
 
-func (bs *batchedSinkEmitter) shouldFlushBatch(batch messageBatch) bool {
+func (bs *batchingSinkEmitter) shouldFlushBatch(batch messageBatch) bool {
 	switch {
 	// all zero values is interpreted as flush every time
 	case bs.batchCfg.Messages == 0 && bs.batchCfg.Bytes == 0 && bs.batchCfg.Frequency == 0:
@@ -329,7 +337,7 @@ func (mb *messageBatch) reset() {
 	mb.alloc = kvevent.Alloc{}
 }
 
-func (mb *messageBatch) AppendKV(p *sinkEvent, keyInValue bool) {
+func (mb *messageBatch) Append(p *sinkEvent, keyNotEmitted bool) {
 	if mb.isEmpty() {
 		mb.bufferTime = timeutil.Now()
 	}
@@ -337,8 +345,9 @@ func (mb *messageBatch) AppendKV(p *sinkEvent, keyInValue bool) {
 	mb.buffer = append(mb.buffer, p.msg)
 	mb.bufferBytes += len(p.msg.val)
 
-	// Don't double-count the key bytes if the key is included in the value
-	if !keyInValue {
+	// Some sinks (ex: webhook) include the key in the value and only emit the
+	// value, therefore in those cases the bytes of the key shouldn't be counted
+	if !keyNotEmitted {
 		mb.bufferBytes += len(p.msg.key)
 	}
 

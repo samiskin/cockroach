@@ -2140,13 +2140,11 @@ func (ps *fakePubsubServer) React(req interface{}) (handled bool, ret interface{
 		ps.mu.Lock()
 		defer ps.mu.Unlock()
 		for _, msg := range publishReq.Messages {
-			// fmt.Printf("\n\x1b[33m REACT (%+v)\x1b[0m\n", msg)
 			ps.mu.buffer = append(ps.mu.buffer, mockPubsubMessage{data: string(msg.Data)})
 		}
 		if ps.mu.notify != nil {
 			notifyCh := ps.mu.notify
 			ps.mu.notify = nil
-			// fmt.Printf("\n\x1b[33m NOTIFYING \x1b[0m\n")
 			close(notifyCh)
 		}
 	}
@@ -2173,7 +2171,6 @@ func (ps *fakePubsubServer) Dial() (*grpc.ClientConn, error) {
 func (ps *fakePubsubServer) Pop() *mockPubsubMessage {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
-	// fmt.Printf("\n\x1b[33m POP (%+v)\x1b[0m\n", len(ps.mu.buffer))
 	if len(ps.mu.buffer) == 0 {
 		return nil
 	}
@@ -2183,7 +2180,6 @@ func (ps *fakePubsubServer) Pop() *mockPubsubMessage {
 }
 
 func (ps *fakePubsubServer) Close() error {
-	fmt.Printf("\x1b[31m FAKE PUBSUB SERVER CLOSE \x1b[0m\n")
 	ps.srv.Wait()
 	return ps.srv.Close()
 }
@@ -2294,8 +2290,8 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	wrapSink := func(s Sink) Sink {
 		mu.Lock() // Called concurrently due to getEventSink and getResolvedTimestampSink
 		defer mu.Unlock()
-		if flushingSink, ok := s.(*flushingSink); ok {
-			if sinkClient, ok := flushingSink.emitter.client.(*pubsubSinkClient); ok {
+		if parallelBatchingSink, ok := s.(*parallelBatchingSink); ok {
+			if sinkClient, ok := parallelBatchingSink.client.(*pubsubSinkClient); ok {
 				_ = sinkClient.client.Close()
 				conn, _ := mockServer.Dial()
 				sinkClient.client, err = pubsub.NewPublisherClient(context.Background(), option.WithGRPCConn(conn))
@@ -2377,8 +2373,6 @@ func extractJSONMessagePubsub(wrapped []byte) (value []byte, key []byte, topic s
 func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 	for {
 		msg := p.mockServer.Pop()
-		fmt.Printf("\n\x1b[31m POPPED (%+v) \x1b[0m\n", msg)
-		// msg := p.client.buffer.pop()
 		if msg != nil {
 			details, err := p.Details()
 			if err != nil {
@@ -2420,10 +2414,8 @@ func (p *pubsubFeed) Next() (*cdctest.TestFeedMessage, error) {
 				case <-ctx.Done():
 					return ctx.Err()
 				case <-p.ss.eventReady():
-					fmt.Printf("\n\x1b[31m EVENT READY (%+v) \x1b[0m\n", msg)
 					return nil
 				case <-p.mockServer.NotifyMessage():
-					fmt.Printf("\n\x1b[31m NOTIFY MESSAGE (%+v) \x1b[0m\n", msg)
 					return nil
 				case <-p.shutdown:
 					return p.terminalJobError()
