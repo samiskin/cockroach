@@ -72,6 +72,7 @@ func makeWebhookSink(
 		retryOpts,
 		int64(64),
 		nil,
+		source,
 		mb(requiresResourceAccounting),
 		pacer,
 	), nil

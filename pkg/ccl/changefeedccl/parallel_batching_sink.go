@@ -24,6 +24,7 @@ func makeParallelBatchingSink(
 	retryOpts retry.Options,
 	numWorkers int64,
 	topicNamer *TopicNamer,
+	timeSource timeutil.TimeSource,
 	metrics metricsRecorder,
 	pacer SinkPacer,
 ) Sink {
@@ -36,7 +37,7 @@ func makeParallelBatchingSink(
 			topic,
 			successCh,
 			errorCh,
-			timeutil.DefaultTimeSource{},
+			timeSource,
 			metrics,
 			pacer,
 		)

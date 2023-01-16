@@ -243,7 +243,7 @@ func TestChangefeedBasics(t *testing.T) {
 
 	// cdcTest(t, testFn, feedTestForceSink("kafka"))
 	// cdcTest(t, testFn, feedTestForceSink("enterprise"))
-	// cdcTest(t, testFn, feedTestForceSink("webhook"))
+	cdcTest(t, testFn, feedTestForceSink("webhook"))
 	cdcTest(t, testFn, feedTestForceSink("pubsub"))
 	// cdcTest(t, testFn, feedTestForceSink("sinkless"))
 	// cdcTest(t, testFn, feedTestForceSink("cloudstorage"))
@@ -6209,10 +6209,7 @@ func TestChangefeedOrderingWithErrors(t *testing.T) {
 			http.StatusInternalServerError,
 			defaultRetryConfig().MaxRetries+1),
 			[]int{http.StatusOK, http.StatusOK, http.StatusOK}...))
-		defer func() {
-			fmt.Printf("\n\x1b[32m CLOSE FEED \x1b[0m\n")
-			closeFeed(t, foo)
-		}()
+		defer closeFeed(t, foo)
 
 		sqlDB.Exec(t, `INSERT INTO foo VALUES (1, 'a')`)
 		sqlDB.Exec(t, `UPSERT INTO foo VALUES (1, 'b')`)

@@ -113,6 +113,10 @@ func (fs *flushingSinkEmitter) emitConfirmationWorker(ctx context.Context) error
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-fs.termCh:
+			fs.mu.RLock()
+			defer fs.mu.RUnlock()
+			return fs.mu.termErr
 		case <-fs.doneCh:
 			return nil
 		case err := <-fs.wrapped.Errors():

@@ -174,8 +174,7 @@ func timeout() time.Duration {
 	if util.RaceEnabled {
 		return 5 * time.Minute
 	}
-	// return 30 * time.Second
-	return 5 * time.Second
+	return 30 * time.Second
 }
 
 // Partitions implements the TestFeed interface.

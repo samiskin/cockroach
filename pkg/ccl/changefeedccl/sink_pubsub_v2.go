@@ -293,6 +293,7 @@ func makePubsubSink(
 		retryOpts,
 		int64(64),
 		topicNamer,
+		source,
 		mb(requiresResourceAccounting),
 		pacer,
 	), nil
