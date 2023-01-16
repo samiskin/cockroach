@@ -92,6 +92,8 @@ func (te *testingBatchedEmitter) Next() []messagePayload {
 		},
 	))
 	tc := te.sc.(*testingSinkClient)
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
 	next := tc.emittedBatches[0]
 	tc.emittedBatches = tc.emittedBatches[1:]
 	return next
@@ -129,6 +131,8 @@ func (te *testingBatchedEmitter) InjectEncodeError(errorCount int) {
 
 func (te *testingBatchedEmitter) Empty() bool {
 	tc := te.sc.(*testingSinkClient)
+	tc.mu.Lock()
+	defer tc.mu.Unlock()
 	return len(tc.emittedBatches) == 0
 }
 

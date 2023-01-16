@@ -2290,7 +2290,10 @@ func (p *pubsubFeedFactory) Feed(create string, args ...interface{}) (cdctest.Te
 	var wg sync.WaitGroup
 	done := make(chan struct{})
 	ss := &sinkSynchronizer{}
+	var mu syncutil.Mutex
 	wrapSink := func(s Sink) Sink {
+		mu.Lock() // Called concurrently due to getEventSink and getResolvedTimestampSink
+		defer mu.Unlock()
 		if flushingSink, ok := s.(*flushingSink); ok {
 			if sinkClient, ok := flushingSink.emitter.client.(*pubsubSinkClient); ok {
 				_ = sinkClient.client.Close()

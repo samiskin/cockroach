@@ -77,12 +77,6 @@ func (fs *flushingSink) decInFlight(flushed int) {
 	}
 }
 
-func (fs *flushingSink) getTermErr() error {
-	fs.mu.RLock()
-	defer fs.mu.RUnlock()
-	return fs.mu.termErr
-}
-
 func (fs *flushingSink) EmitRow(
 	ctx context.Context,
 	topic TopicDescriptor,
@@ -90,10 +84,6 @@ func (fs *flushingSink) EmitRow(
 	updated, mvcc hlc.Timestamp,
 	alloc kvevent.Alloc,
 ) error {
-	if err := fs.getTermErr(); err != nil {
-		return err
-	}
-
 	// fmt.Printf("\n\x1b[31m EMIT ROW %s \x1b[0m\n", string(key))
 	var topicName string
 	var err error
