@@ -351,7 +351,8 @@ func (ca *changeAggregator) startKVFeed(
 		defer close(ca.kvFeedDoneCh)
 		// Trying to call MoveToDraining here is racy (`MoveToDraining called in
 		// state stateTrailingMeta`), so return the error via a channel.
-		ca.errCh <- kvfeed.Run(ctx, kvfeedCfg)
+		err := kvfeed.Run(ctx, kvfeedCfg)
+		ca.errCh <- errors.Wrapf(err, "error while running kvfeed")
 	}); err != nil {
 		// If err != nil then the RunAsyncTask closure never ran, which means we
 		// need to manually close ca.kvFeedDoneCh so `(*changeAggregator).close`

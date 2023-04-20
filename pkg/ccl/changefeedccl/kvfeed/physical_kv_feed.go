@@ -85,7 +85,7 @@ func (p rangefeedFactory) Run(ctx context.Context, sink kvevent.Writer, cfg rang
 	g.GoCtx(func(ctx context.Context) error {
 		return p(ctx, cfg.Spans, feed.eventC, rfOpts...)
 	})
-	return g.Wait()
+	return errors.Wrapf(g.Wait(), "rangefeed error")
 }
 
 func (p *rangefeed) addEventsToBuffer(ctx context.Context) error {
